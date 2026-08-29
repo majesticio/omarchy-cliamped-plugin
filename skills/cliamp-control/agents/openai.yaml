@@ -1,0 +1,4 @@
+interface:
+  display_name: "CLIAMP Control"
+  short_description: "Control CLIAMP playback and CLIAMPed UI"
+  default_prompt: "Use $cliamp-control to inspect and control my CLIAMP session."

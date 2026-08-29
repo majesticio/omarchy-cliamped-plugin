@@ -9,17 +9,17 @@ BarWidget {
   moduleName: "io.github.majesticio.cliamped"
 
   readonly property var stations: [
-    { name: "Lofi", detail: "Low desert focus", url: "https://radio.cliamp.stream/lofi/stream" },
-    { name: "Synthwave", detail: "Neon mesa", url: "https://radio.cliamp.stream/synthwave/stream" },
-    { name: "EDM", detail: "Desert pulse", url: "https://radio.cliamp.stream/edm/stream" },
-    { name: "NCS", detail: "No copyright sounds", url: "https://radio.cliamp.stream/ncs/stream" },
-    { name: "House", detail: "Adobe house", url: "https://radio.cliamp.stream/ncs-house/stream" },
-    { name: "Dubstep", detail: "Canyon bass", url: "https://radio.cliamp.stream/ncs-dubstep/stream" },
-    { name: "Drum & Bass", detail: "High desert drive", url: "https://radio.cliamp.stream/ncs-dnb/stream" },
-    { name: "Trap", detail: "After-dark rhythm", url: "https://radio.cliamp.stream/ncs-trap/stream" },
-    { name: "Phonk", detail: "Dust and chrome", url: "https://radio.cliamp.stream/ncs-phonk/stream" },
-    { name: "Pop", detail: "Sunlit pop", url: "https://radio.cliamp.stream/ncs-pop/stream" },
-    { name: "Chill", detail: "Moonrise chill", url: "https://radio.cliamp.stream/ncs-chill/stream" }
+    { name: "Lofi", url: "https://radio.cliamp.stream/lofi/stream" },
+    { name: "Synthwave", url: "https://radio.cliamp.stream/synthwave/stream" },
+    { name: "EDM", url: "https://radio.cliamp.stream/edm/stream" },
+    { name: "NCS", url: "https://radio.cliamp.stream/ncs/stream" },
+    { name: "House", url: "https://radio.cliamp.stream/ncs-house/stream" },
+    { name: "Dubstep", url: "https://radio.cliamp.stream/ncs-dubstep/stream" },
+    { name: "Drum & Bass", url: "https://radio.cliamp.stream/ncs-dnb/stream" },
+    { name: "Trap", url: "https://radio.cliamp.stream/ncs-trap/stream" },
+    { name: "Phonk", url: "https://radio.cliamp.stream/ncs-phonk/stream" },
+    { name: "Pop", url: "https://radio.cliamp.stream/ncs-pop/stream" },
+    { name: "Chill", url: "https://radio.cliamp.stream/ncs-chill/stream" }
   ]
 
   property bool sessionReady: false
@@ -41,7 +41,9 @@ BarWidget {
   property bool mono: false
   property real playbackSpeed: 1
   property string eqPreset: "Flat"
-  property string visualizerMode: "Bars"
+  readonly property var panelVisualizers: ["Spectrum", "Canyon", "Pulse"]
+  property int panelVisualizerIndex: 0
+  readonly property string panelVisualizerName: panelVisualizers[panelVisualizerIndex]
   property int currentIndex: 0
   property int trackTotal: 0
   property string errorText: ""
@@ -49,11 +51,16 @@ BarWidget {
   property var providers: []
   property var providerPlaylists: []
   property var providerResults: []
+  property var searchFavorites: []
+  property bool searchFavoritesBusy: false
   property string selectedProviderKey: ""
   property string loadedProviderPlaylistId: ""
   property string providerRequestKind: ""
   property bool providerBusy: false
   property bool providerSearchAttempted: false
+  property int radioCatalogOffset: 0
+  property bool radioCatalogHasMore: true
+  property bool radioCatalogRequested: false
   property string providerError: ""
   property var queueTracks: []
   property var historyItems: []
@@ -63,10 +70,53 @@ BarWidget {
   property var ipcCurrent: null
   property bool ipcBusy: false
   property bool volumeDirty: false
+  property real pendingVolumeDelta: 0
   property var pendingAfterStart: null
   property int startupAttempts: 0
 
   readonly property bool playing: state === "playing"
+  readonly property var providerCollections: {
+    var collections = []
+    for (var i = 0; i < providerPlaylists.length; ++i) {
+      var item = providerPlaylists[i]
+      // CLIAMP's built-in radio entry is an M3U index. The panel exposes its
+      // resolved channels separately so it is never presented as a dead card.
+      // Favorite aliases (`f:`) belong exclusively in Favorites; CLIAMP also
+      // returns their starred catalog (`c:`) entries, so showing both here
+      // would duplicate each favorited station in Browse.
+      if (selectedProviderKey === "radio") {
+        var itemId = String(item.id || "")
+        if (itemId === "l:0" || itemId.indexOf("f:") === 0) continue
+      }
+      collections.push(item)
+    }
+    return collections
+  }
+  readonly property var providerFavorites: {
+    var favorites = []
+    for (var i = 0; i < providerPlaylists.length; ++i) {
+      var item = providerPlaylists[i]
+      if (String(item.id || "").indexOf("f:") === 0) favorites.push(item)
+    }
+    return favorites
+  }
+  readonly property var favoriteItems: {
+    var favorites = []
+    var nativeNames = ({})
+    for (var i = 0; i < providerFavorites.length; ++i) {
+      var item = providerFavorites[i]
+      var cleanName = String(item.name || item.id).replace(/^★\s*/, "")
+      nativeNames[cleanName.toLowerCase()] = true
+      favorites.push({ kind: "provider", id: item.id, name: cleanName })
+    }
+    for (var j = 0; j < searchFavorites.length; ++j) {
+      var track = searchFavorites[j]
+      var title = String(track.title || track.path)
+      if (nativeNames[title.toLowerCase()]) continue
+      favorites.push({ kind: "search", id: "search:" + String(track.path), name: title, track: track })
+    }
+    return favorites
+  }
   readonly property string sessionLabel: sessionMode === "headless" ? "BACKGROUND"
     : sessionMode === "tui" ? "CLIAMP TUI" : "CONNECTING"
   readonly property string selectedStation: stationNameFor(trackPath)
@@ -76,19 +126,65 @@ BarWidget {
     : "󰝚  CLIAMP"
 
   function stationNameFor(path) {
-    var clean = String(path || "").replace(/\/$/, "")
+    var clean = String(path || "").replace(/^https?:/i, "").replace(/\/$/, "")
     for (var i = 0; i < stations.length; ++i) {
-      if (String(stations[i].url).replace(/\/$/, "") === clean) return stations[i].name
+      if (String(stations[i].url).replace(/^https?:/i, "").replace(/\/$/, "") === clean)
+        return stations[i].name
     }
     return ""
+  }
+
+  function catalogSize(playlists) {
+    var count = 0
+    for (var i = 0; i < playlists.length; ++i)
+      if (/^c:/.test(String(playlists[i].id || ""))) count += 1
+    return count
   }
 
   function ipcHelperPath() {
     return String(Qt.resolvedUrl("cliamp_ipc.py")).replace(/^file:\/\//, "")
   }
 
+  function searchFavoritesHelperPath() {
+    return String(Qt.resolvedUrl("cliamped_search_favorites.py")).replace(/^file:\/\//, "")
+  }
+
+  function isSearchFavorite(track) {
+    var path = String(track && track.path || "")
+    for (var i = 0; i < searchFavorites.length; ++i)
+      if (String(searchFavorites[i].path || "") === path) return true
+    return false
+  }
+
+  function refreshSearchFavorites() {
+    if (searchFavoriteProcess.running) return
+    searchFavoritesBusy = true
+    searchFavoriteProcess.command = ["python3", searchFavoritesHelperPath(), "list"]
+    searchFavoriteProcess.running = true
+  }
+
+  function toggleSearchFavorite(track) {
+    if (!track || !track.path || searchFavoriteProcess.running) return
+    searchFavoritesBusy = true
+    searchFavoriteProcess.command = ["python3", searchFavoritesHelperPath(), "toggle", JSON.stringify(track)]
+    searchFavoriteProcess.running = true
+  }
+
+  function playFavorite(item) {
+    if (!item) return
+    if (item.kind === "search") playProviderTrack(item.track)
+    else loadProviderPlaylist(item.id)
+  }
+
+  function removeFavorite(item) {
+    if (!item) return
+    if (item.kind === "search") toggleSearchFavorite(item.track)
+    else toggleProviderFavorite(item.id)
+  }
+
   function isProviderKind(kind) {
-    return kind === "providers" || kind === "playlists" || kind === "search" || kind === "load"
+    return kind === "providers" || kind === "playlists" || kind === "catalog"
+      || kind === "favorite" || kind === "search" || kind === "load" || kind === "urlLoad"
   }
 
   function syncProviderBusy() {
@@ -115,12 +211,13 @@ BarWidget {
     return true
   }
 
-  function enqueueVolume(target) {
-    var pending = ipcQueue.filter(function(item) { return item.kind !== "volumeAction" })
+  function enqueueVolume(delta) {
+    if (!delta) return
+    var pending = ipcQueue.slice()
     pending.push({
       kind: "volumeAction",
-      request: { cmd: "volume", value: target },
-      fallback: ["volume", String(target)]
+      request: { cmd: "volume", value: delta },
+      fallback: ["volume", String(delta)]
     })
     ipcQueue = pending
     volumeDirty = true
@@ -168,6 +265,9 @@ BarWidget {
     providerPlaylists = []
     providerResults = []
     providerSearchAttempted = false
+    radioCatalogOffset = 0
+    radioCatalogHasMore = true
+    radioCatalogRequested = false
     if (selectedProviderKey)
       runProviderRequest("playlists", { cmd: "provider.playlists", provider: selectedProviderKey })
   }
@@ -180,6 +280,27 @@ BarWidget {
     runProviderRequest("search", {
       cmd: "provider.search", provider: selectedProviderKey, query: value, limit: 18
     })
+  }
+
+  function loadRadioCatalog() {
+    if (selectedProviderKey !== "radio" || !radioCatalogHasMore) return
+    radioCatalogRequested = true
+    runProviderRequest("catalog", {
+      cmd: "provider.catalog", provider: "radio", offset: radioCatalogOffset, limit: 18
+    })
+  }
+
+  function toggleProviderFavorite(playlistId) {
+    if (selectedProviderKey !== "radio" || !playlistId) return
+    runProviderRequest("favorite", {
+      cmd: "provider.favorite", provider: "radio", playlist: String(playlistId)
+    })
+  }
+
+  function showFavorites() {
+    if (!providers.length) refreshProviders()
+    else if (selectedProviderKey !== "radio") selectProvider("radio")
+    else runProviderRequest("playlists", { cmd: "provider.playlists", provider: "radio" })
   }
 
   function loadProviderPlaylist(playlistId) {
@@ -263,7 +384,6 @@ BarWidget {
       mono = value.mono === true
       playbackSpeed = value.speed === undefined ? 1 : Number(value.speed)
       eqPreset = String(value.eq_preset || "Flat")
-      visualizerMode = String(value.visualizer || bandStream.mode || "Bars")
       currentIndex = value.index === undefined ? 0 : Number(value.index)
       trackTotal = value.total === undefined ? 0 : Number(value.total)
       positionSeconds = value.position === undefined ? 0 : Number(value.position)
@@ -321,6 +441,7 @@ BarWidget {
     if (!sessionReady) return
     var target = Math.max(-30, Math.min(6, volumeDb + Number(delta || 0)))
     if (target === volumeDb) return
+    pendingVolumeDelta += target - volumeDb
     volumeDb = target
     volumeCommit.restart()
   }
@@ -328,14 +449,23 @@ BarWidget {
   function cycleRepeat() { if (sessionReady) runAction(["repeat", "cycle"]) }
   function toggleMono() { if (sessionReady) runAction(["mono", "toggle"]) }
   function nextVisualizer() {
-    // CLIAMP exposes visualizer switching only from an attached TUI session.
-    if (sessionReady && sessionMode === "tui") runAction(["vis", "next"])
+    panelVisualizerIndex = (panelVisualizerIndex + 1) % panelVisualizers.length
+  }
+  function selectPanelVisualizer(name) {
+    var requested = String(name || "").trim().toLowerCase()
+    for (var i = 0; i < panelVisualizers.length; ++i) {
+      if (panelVisualizers[i].toLowerCase() === requested) {
+        panelVisualizerIndex = i
+        return panelVisualizers[i]
+      }
+    }
+    return "invalid visualizer"
   }
   function setSpeed(value) { if (sessionReady) runAction(["speed", String(value)]) }
   function setEqPreset(value) { if (sessionReady) runAction(["eq", String(value)]) }
   function seekTo(seconds) {
     if (sessionReady && durationSeconds > 0)
-      runAction(["seek", String(Math.max(0, Math.min(durationSeconds, seconds - positionSeconds)))])
+      runAction(["seek", String(Math.max(0, Math.min(durationSeconds, seconds)) - positionSeconds)])
   }
   function queueMedia(value) {
     var target = String(value || "").trim()
@@ -367,19 +497,28 @@ BarWidget {
       delayedSelection.restart()
       return
     }
+    enqueueIpc("queueMutation", { cmd: "queue.clear" }, [])
     enqueueIpc("play", { cmd: "track.play", track: {
       title: station.name + " Stream", path: station.url, stream: true
     } }, [])
   }
 
   function togglePanel() {
-    if (panelLoader.item && panelLoader.item.toggle) panelLoader.item.toggle()
+    if (!panelLoader.item || !panelLoader.item.toggle) return
+    var opening = panelLoader.item.opened !== true
+    panelLoader.item.toggle()
+    if (opening && panelLoader.item.libraryTab === "favorites") showFavorites()
   }
   function openTab(tab) {
     var target = panelLoader.item
     if (!target) return "unavailable"
-    target.libraryTab = String(tab || "radio")
-    if (target.libraryTab === "providers" && !providers.length) refreshProviders()
+    var requested = String(tab || "favorites")
+    requested = requested === "radio" || requested === "browse" ? "providers" : requested
+    if (["favorites", "providers", "queue", "files", "more"].indexOf(requested) < 0)
+      return "invalid tab"
+    target.libraryTab = requested
+    if (target.libraryTab === "favorites") showFavorites()
+    else if (target.libraryTab === "providers" && !providers.length) refreshProviders()
     else if (target.libraryTab === "queue") refreshQueue()
     else if (target.libraryTab === "more") {
       refreshHistory()
@@ -389,7 +528,12 @@ BarWidget {
     target.open()
     return "ok"
   }
-  function open() { if (panelLoader.item && panelLoader.item.openFromHotkey) panelLoader.item.openFromHotkey() }
+  function open() {
+    if (panelLoader.item && panelLoader.item.openFromHotkey) {
+      panelLoader.item.openFromHotkey()
+      if (panelLoader.item.libraryTab === "favorites") showFavorites()
+    }
+  }
   function close() { if (panelLoader.item && panelLoader.item.close) panelLoader.item.close() }
   function closeForPopoutSwitch() {
     if (panelLoader.item && panelLoader.item.closeForPopoutSwitch) panelLoader.item.closeForPopoutSwitch()
@@ -404,13 +548,13 @@ BarWidget {
   onBarChanged: injectPanel()
   onSettingsChanged: injectPanel()
 
-  BandStream { id: bandStream; enabled: root.sessionReady; fps: 18 }
+  BandStream { id: bandStream; enabled: root.sessionReady; fps: 30 }
 
   Loader {
     id: panelLoader
     active: true
     // Keep this query aligned with manifest.json so Qt drops stale panel components on updates.
-    source: Qt.resolvedUrl("Panel.qml") + "?v=1.0.3"
+    source: Qt.resolvedUrl("Panel.qml") + "?v=1.1.0"
     visible: false
     onLoaded: {
       root.injectPanel()
@@ -444,15 +588,19 @@ BarWidget {
         font.family: root.bar ? root.bar.fontFamily : Style.font.family
         font.pixelSize: Style.font.body
       }
-      Spectrum {
+      DesertVisualizer {
         anchors.verticalCenter: parent.verticalCenter
         width: 34
         height: 13
-        gap: 1
         bands: root.bands
-        lowColor: Color.accent
-        midColor: root.bar.barForeground
-        highColor: root.bar.urgent
+        playing: root.playing
+        mode: root.panelVisualizerIndex
+        compact: true
+        turquoise: Color.accent
+        sand: root.bar.barForeground
+        adobe: root.bar.urgent
+        sky: root.bar ? root.bar.background : Color.background
+        onCycleRequested: root.nextVisualizer()
       }
       Text {
         anchors.verticalCenter: parent.verticalCenter
@@ -492,6 +640,7 @@ BarWidget {
     function hide(): void { root.close() }
     function toggle(): void { root.togglePanel() }
     function tab(name: string): string { return root.openTab(name) }
+    function visualizer(name: string): string { return root.selectPanelVisualizer(name) }
   }
 
   Process {
@@ -527,8 +676,8 @@ BarWidget {
           if (!statusProbe.running) statusProbe.running = true
         } else if (current && current.fallback && current.fallback.length) {
           root.runFallback(current.fallback)
-        } else if (kind === "providers" || kind === "playlists"
-            || kind === "search" || kind === "load") {
+        } else if (kind === "providers" || kind === "playlists" || kind === "catalog"
+            || kind === "favorite" || kind === "search" || kind === "load" || kind === "urlLoad") {
           root.providerError = message
         } else {
           root.errorText = message
@@ -542,11 +691,35 @@ BarWidget {
       } else if (kind === "providers") {
         root.providerError = ""
         root.providers = response.providers || []
-        if (!root.selectedProviderKey && root.providers.length)
-          root.selectProvider(root.providers[0].key)
+        if (root.providers.length) {
+          var nextProvider = root.providers[0].key
+          for (var providerIndex = 0; providerIndex < root.providers.length; ++providerIndex) {
+            if (root.providers[providerIndex].key === root.selectedProviderKey) {
+              nextProvider = root.selectedProviderKey
+              break
+            }
+          }
+          // Always refresh the selected source's collections after listing
+          // providers. This also repairs state after a shell/plugin reload.
+          root.selectProvider(nextProvider)
+        }
       } else if (kind === "playlists") {
         root.providerError = ""
         root.providerPlaylists = response.playlists || []
+        if (root.selectedProviderKey === "radio") {
+          root.radioCatalogOffset = root.catalogSize(root.providerPlaylists)
+          if (root.radioCatalogOffset === 0 && !root.radioCatalogRequested)
+            root.loadRadioCatalog()
+        }
+      } else if (kind === "catalog") {
+        root.providerError = ""
+        root.providerPlaylists = response.playlists || []
+        var added = Number(response.total || 0)
+        root.radioCatalogOffset = root.catalogSize(root.providerPlaylists)
+        root.radioCatalogHasMore = added > 0
+      } else if (kind === "favorite") {
+        root.providerError = ""
+        root.runProviderRequest("playlists", { cmd: "provider.playlists", provider: "radio" })
       } else if (kind === "search") {
         root.providerError = ""
         root.providerResults = response.tracks || []
@@ -554,6 +727,25 @@ BarWidget {
         root.providerError = ""
         root.loadedProviderPlaylistId = current && current.request
           ? String(current.request.playlist || "") : ""
+        var loadedTracks = response.tracks || []
+        var radioIndex = loadedTracks.length === 1
+          && /\.m3u8?(?:$|\?)/i.test(String(loadedTracks[0].path || ""))
+          && root.selectedProviderKey === "radio"
+        if (radioIndex) {
+          root.queueTracks = []
+        } else {
+          root.queueTracks = loadedTracks
+        }
+        root.currentIndex = root.queueTracks.length ? 0 : -1
+        if (radioIndex) {
+          root.enqueueIpc("queueMutation", { cmd: "queue.clear" }, [])
+          root.enqueueIpc("urlLoad", { cmd: "url.load", path: loadedTracks[0].path }, [])
+        } else if (root.queueTracks.length) {
+          root.enqueueIpc("action", { cmd: "play" }, ["play"])
+        }
+        actionRefresh.restart()
+      } else if (kind === "urlLoad") {
+        root.providerError = ""
         root.queueTracks = response.tracks || []
         root.currentIndex = root.queueTracks.length ? 0 : -1
         actionRefresh.restart()
@@ -595,6 +787,26 @@ BarWidget {
       if (root.ownsDaemon) {
         root.ownsDaemon = false
         root.errorText = exitCode === 0 ? "CLIAMP stopped." : "CLIAMP daemon exited unexpectedly."
+      }
+    }
+  }
+
+  Process {
+    id: searchFavoriteProcess
+    command: ["true"]
+    stdout: StdioCollector { id: searchFavoriteOut; waitForEnd: true }
+    stderr: StdioCollector { id: searchFavoriteErr; waitForEnd: true }
+    onExited: function(exitCode) {
+      root.searchFavoritesBusy = false
+      try {
+        var response = JSON.parse(String(searchFavoriteOut.text || ""))
+        if (exitCode === 0 && response && response.ok) {
+          root.searchFavorites = response.favorites || []
+          return
+        }
+        root.providerError = String(response.error || searchFavoriteErr.text || "Could not update favorite.")
+      } catch (e) {
+        root.providerError = String(searchFavoriteErr.text || "Could not update favorite.")
       }
     }
   }
@@ -652,7 +864,11 @@ BarWidget {
   Timer {
     id: volumeCommit
     interval: 90
-    onTriggered: root.enqueueVolume(root.volumeDb)
+    onTriggered: {
+      var delta = root.pendingVolumeDelta
+      root.pendingVolumeDelta = 0
+      root.enqueueVolume(delta)
+    }
   }
   Timer { id: queueRefresh; interval: 350; onTriggered: root.refreshQueue() }
   Timer {
@@ -668,4 +884,5 @@ BarWidget {
     repeat: true
     onTriggered: root.positionSeconds = Math.min(root.durationSeconds, root.positionSeconds + interval / 1000)
   }
+  Component.onCompleted: refreshSearchFavorites()
 }

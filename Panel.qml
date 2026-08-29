@@ -12,7 +12,7 @@ Panel {
 
   property var anchorItem: null
   property var hostWidget: null
-  property string libraryTab: "radio"
+  property string libraryTab: "favorites"
   property string filePickerStatus: ""
   property bool filePickerFailed: false
   property string pickerMode: "files"
@@ -34,18 +34,16 @@ Panel {
     return Qt.rgba(colorValue.r, colorValue.g, colorValue.b, alpha)
   }
   function launchAudioPicker(mode) {
-    if (audioPicker.running) return
+    if (audioPicker.running || pickerLaunch.running) return
     root.pickerMode = mode
-    audioPicker.command = [
-      "python3",
-      String(Qt.resolvedUrl("cliamp_file_picker.py")).replace(/^file:\/\//, ""),
-      mode === "folder" ? "--folder" : "--files"
-    ]
     root.filePickerStatus = mode === "folder"
       ? "Choose a folder; its audio tracks will be queued in filename order…"
       : "Waiting for your selection…"
     root.filePickerFailed = false
-    audioPicker.running = true
+    // A layer-shell panel sits above ordinary application windows. Close it
+    // before Zenity opens so the native picker cannot appear behind the panel.
+    root.close()
+    pickerLaunch.restart()
   }
   function clock(seconds) {
     var value = Math.max(0, Math.floor(Number(seconds || 0)))
@@ -84,12 +82,16 @@ Panel {
       if (response && response.cancelled) {
         root.filePickerStatus = root.pickerMode === "folder" ? "No folder selected." : "No files selected."
         root.filePickerFailed = false
+        root.libraryTab = "files"
+        root.open()
         return
       }
       if (exitCode !== 0 || !response || !response.ok) {
         root.filePickerStatus = response && response.error ? String(response.error)
           : String(audioPickerErr.text || "File picker did not return a result.").trim()
         root.filePickerFailed = true
+        root.libraryTab = "files"
+        root.open()
         return
       }
       root.filePickerStatus = response.selected_count + (response.selected_count === 1
@@ -102,6 +104,20 @@ Panel {
         root.hostWidget.probe()
       }
       root.libraryTab = "queue"
+      root.open()
+    }
+  }
+
+  Timer {
+    id: pickerLaunch
+    interval: 180
+    onTriggered: {
+      audioPicker.command = [
+        "python3",
+        String(Qt.resolvedUrl("cliamp_file_picker.py")).replace(/^file:\/\//, ""),
+        root.pickerMode === "folder" ? "--folder" : "--files"
+      ]
+      audioPicker.running = true
     }
   }
 
@@ -113,8 +129,8 @@ Panel {
     open: root.opened
     centerOnBar: true
     focusTarget: keyCatcher
-    contentWidth: panel.fittedContentWidth(Style.space(510))
-    contentHeight: panel.fittedContentHeight(contentColumn.implicitHeight)
+    contentWidth: panel.fittedContentWidth(Style.space(1120))
+    contentHeight: panel.fittedContentHeight(Style.space(930))
 
     PanelKeyCatcher {
       id: keyCatcher
@@ -181,16 +197,16 @@ Panel {
                 text: "CLIAMPED"
                 color: root.turquoise
                 font.family: root.panelFont
-                font.pixelSize: Style.font.caption
+                font.pixelSize: Style.font.title
                 font.bold: true
-                font.letterSpacing: 2.2
+                font.letterSpacing: 2.4
               }
               Text {
                 text: "YOUR MUSIC, FULLY CLIAMPED"
                 color: root.mutedSand
                 font.family: root.panelFont
-                font.pixelSize: Style.font.bodySmall
-                font.letterSpacing: 0.9
+                font.pixelSize: Style.font.caption
+                font.letterSpacing: 1.1
               }
             }
             Rectangle {
@@ -214,7 +230,7 @@ Panel {
 
           Rectangle {
             width: parent.width
-            height: Style.space(170)
+            height: Style.space(230)
             radius: Style.cornerRadius
             color: root.tint(root.night, 0.78)
             border.width: 1
@@ -264,16 +280,93 @@ Panel {
               }
               DesertVisualizer {
                 width: parent.width
-                height: Style.space(86)
+                height: Style.space(146)
                 bands: root.hostWidget ? root.hostWidget.bands : []
                 playing: root.hostWidget && root.hostWidget.playing
+                mode: root.hostWidget ? root.hostWidget.panelVisualizerIndex : 0
                 turquoise: root.turquoise
                 sand: root.sand
                 adobe: root.adobe
                 sky: root.night
+                onCycleRequested: if (root.hostWidget) root.hostWidget.nextVisualizer()
               }
             }
           }
+
+          Row {
+            id: navigationRow
+            width: parent.width
+            spacing: Style.space(8)
+            Repeater {
+              model: [
+                { key: "favorites", label: "FAVORITES" },
+                { key: "providers", label: "BROWSE" },
+                { key: "queue", label: "QUEUE" },
+                { key: "files", label: "FILES" },
+                { key: "more", label: "MORE" }
+              ]
+              Rectangle {
+                required property var modelData
+                readonly property bool selected: root.libraryTab === modelData.key
+                width: (navigationRow.width - Style.space(32)) / 5
+                height: Style.space(36)
+                radius: Style.cornerRadius
+                color: selected ? root.tint(root.turquoise, 0.16) : "transparent"
+                border.width: 1
+                border.color: selected ? root.turquoise : root.tint(root.mutedSand, 0.22)
+                Text {
+                  anchors.centerIn: parent
+                  text: modelData.label
+                  color: selected ? root.sand : root.mutedSand
+                  font.family: root.panelFont
+                  font.pixelSize: Style.font.caption
+                  font.bold: selected
+                  font.letterSpacing: 1.2
+                }
+                MouseArea {
+                  anchors.fill: parent
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: {
+                    root.libraryTab = modelData.key
+                    browserFlick.contentY = 0
+                    root.returnToPanelKeys()
+                    if (modelData.key === "favorites" && root.hostWidget)
+                      root.hostWidget.showFavorites()
+                    else if (modelData.key === "providers" && root.hostWidget)
+                      root.hostWidget.refreshProviders()
+                    else if (modelData.key === "queue" && root.hostWidget)
+                      root.hostWidget.refreshQueue()
+                    else if (modelData.key === "more" && root.hostWidget) {
+                      root.hostWidget.refreshHistory()
+                      root.hostWidget.refreshLyrics()
+                      root.hostWidget.refreshDevices()
+                    }
+                  }
+                }
+              }
+            }
+          }
+
+          Row {
+            id: workspaceRow
+            width: parent.width
+            height: Style.space(540)
+            spacing: Style.space(16)
+
+            Rectangle {
+              id: playerCard
+              width: Style.space(450)
+              height: workspaceRow.height
+              radius: Style.cornerRadius
+              color: root.tint(root.night, 0.46)
+              border.width: 1
+              border.color: root.tint(root.adobe, 0.18)
+
+              Column {
+                id: playerDeck
+                anchors.fill: parent
+                anchors.margins: Style.space(14)
+                spacing: Style.space(14)
 
           Column {
             width: parent.width
@@ -320,20 +413,32 @@ Panel {
             }
           }
 
-          Row {
-            anchors.horizontalCenter: parent.horizontalCenter
-            spacing: Style.space(10)
+          Text {
+            width: parent.width
+            text: "PLAYBACK"
+            color: root.turquoise
+            font.family: root.panelFont
+            font.pixelSize: Style.font.caption
+            font.bold: true
+            font.letterSpacing: 1.2
+          }
+
+          Grid {
+            id: transportGrid
+            width: parent.width
+            columns: 2
+            spacing: Style.space(8)
             Repeater {
               model: [
-                { icon: "󰒮", label: "PREVIOUS", action: "previous" },
                 { icon: root.hostWidget && root.hostWidget.playing ? "󰏤" : "󰐊", label: "PLAY / PAUSE", action: "togglePlayback" },
-                { icon: "󰒭", label: "NEXT", action: "next" },
-                { icon: "󰓛", label: "STOP", action: "stop" }
+                { icon: "󰓛", label: "STOP", action: "stop" },
+                { icon: "󰒮", label: "PREVIOUS", action: "previous" },
+                { icon: "󰒭", label: "NEXT", action: "next" }
               ]
               Rectangle {
                 required property var modelData
-                width: Style.space(modelData.action === "togglePlayback" ? 128 : 94)
-                height: Style.space(40)
+                width: (transportGrid.width - transportGrid.spacing) / 2
+                height: Style.space(44)
                 radius: Style.cornerRadius
                 color: controlMouse.containsMouse ? root.tint(root.adobe, 0.2) : root.tint(root.night, 0.62)
                 border.width: 1
@@ -355,54 +460,391 @@ Panel {
             }
           }
 
-          Row {
+          Text {
             width: parent.width
-            spacing: Style.space(8)
+            text: "PLAYBACK SPEED  ·  " + (root.hostWidget ? root.hostWidget.playbackSpeed : 1) + "×"
+            color: root.turquoise
+            font.family: root.panelFont
+            font.pixelSize: Style.font.caption
+            font.bold: true
+            font.letterSpacing: 1.2
+          }
+
+          Grid {
+            id: speedGrid
+            width: parent.width
+            columns: 4
+            spacing: Style.space(7)
             Repeater {
-              model: [
-                { key: "radio", label: "STATIONS" },
-                { key: "providers", label: "PROVIDERS" },
-                { key: "queue", label: "QUEUE" },
-                { key: "files", label: "FILES" },
-                { key: "more", label: "MORE" }
-              ]
+              model: [0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2]
               Rectangle {
-                required property var modelData
-                readonly property bool selected: root.libraryTab === modelData.key
-                width: (contentColumn.width - Style.space(32)) / 5
-                height: Style.space(34)
+                required property real modelData
+                readonly property bool selected: root.hostWidget
+                  && Math.abs(root.hostWidget.playbackSpeed - modelData) < 0.01
+                width: (speedGrid.width - speedGrid.spacing * 3) / 4
+                height: Style.space(31)
                 radius: Style.cornerRadius
-                color: selected ? root.tint(root.turquoise, 0.16) : "transparent"
+                color: selected ? root.tint(root.turquoise, 0.18) : "transparent"
                 border.width: 1
                 border.color: selected ? root.turquoise : root.tint(root.mutedSand, 0.22)
                 Text {
                   anchors.centerIn: parent
-                  text: modelData.label
+                  width: parent.width - Style.space(3)
+                  text: modelData + "×"
                   color: selected ? root.sand : root.mutedSand
                   font.family: root.panelFont
                   font.pixelSize: Style.font.caption
-                  font.bold: selected
-                  font.letterSpacing: 1.2
+                  horizontalAlignment: Text.AlignHCenter
+                  elide: Text.ElideRight
                 }
                 MouseArea {
                   anchors.fill: parent
                   cursorShape: Qt.PointingHandCursor
-                  onClicked: {
-                    root.libraryTab = modelData.key
-                    root.returnToPanelKeys()
-                    if (modelData.key === "providers" && root.hostWidget
-                        && !root.hostWidget.providers.length)
-                      root.hostWidget.refreshProviders()
-                    else if (modelData.key === "queue" && root.hostWidget)
-                      root.hostWidget.refreshQueue()
-                    else if (modelData.key === "more" && root.hostWidget) {
-                      root.hostWidget.refreshHistory()
-                      root.hostWidget.refreshLyrics()
-                      root.hostWidget.refreshDevices()
+                  onClicked: if (root.hostWidget) root.hostWidget.setSpeed(modelData)
+                }
+              }
+            }
+          }
+
+          Text {
+            width: parent.width
+            text: "EQUALIZER  ·  " + (root.hostWidget ? root.hostWidget.eqPreset.toUpperCase() : "FLAT")
+            color: root.adobe
+            font.family: root.panelFont
+            font.pixelSize: Style.font.caption
+            font.bold: true
+            font.letterSpacing: 1.2
+          }
+
+          Grid {
+            id: deckEqGrid
+            width: parent.width
+            columns: 4
+            spacing: Style.space(7)
+            Repeater {
+              model: [
+                "Flat", "Rock", "Pop", "Jazz",
+                "Classical", "Bass Boost", "Treble Boost", "Vocal",
+                "Electronic", "Acoustic", "Hip-Hop", "R&B",
+                "Loudness", "Late Night", "Podcast", "Small Speakers"
+              ]
+              Rectangle {
+                required property string modelData
+                readonly property bool selected: root.hostWidget
+                  && root.hostWidget.eqPreset.toLowerCase() === modelData.toLowerCase()
+                width: (deckEqGrid.width - Style.space(21)) / 4
+                height: Style.space(31)
+                radius: Style.cornerRadius
+                color: selected ? root.tint(root.adobe, 0.2) : "transparent"
+                border.width: 1
+                border.color: selected ? root.adobe : root.tint(root.mutedSand, 0.2)
+                Text {
+                  anchors.centerIn: parent
+                  width: parent.width - Style.space(4)
+                  text: modelData.toUpperCase()
+                  color: selected ? root.sand : root.mutedSand
+                  font.family: root.panelFont
+                  font.pixelSize: 9
+                  horizontalAlignment: Text.AlignHCenter
+                  elide: Text.ElideRight
+                }
+                MouseArea {
+                  anchors.fill: parent
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: if (root.hostWidget) root.hostWidget.setEqPreset(modelData)
+                }
+              }
+            }
+          }
+
+          Row {
+            id: deckUtilityRow
+            width: parent.width
+            spacing: Style.space(8)
+
+            Rectangle {
+              id: volumeDeck
+              width: parent.width * 0.4
+              height: Style.space(48)
+              radius: Style.cornerRadius
+              color: root.tint(root.night, 0.42)
+              border.width: 1
+              border.color: root.tint(root.mutedSand, 0.24)
+              Row {
+                anchors.fill: parent
+                Repeater {
+                  model: [
+                    { label: "−", action: "down" },
+                    { label: (root.hostWidget ? Math.round(root.hostWidget.volumeDb) : 0) + " dB", action: "none" },
+                    { label: "+", action: "up" }
+                  ]
+                  Rectangle {
+                    required property var modelData
+                    width: volumeDeck.width / 3
+                    height: volumeDeck.height
+                    color: volumeMouse.containsMouse && modelData.action !== "none"
+                      ? root.tint(root.turquoise, 0.15) : "transparent"
+                    Text {
+                      anchors.centerIn: parent
+                      text: modelData.label
+                      color: modelData.action === "none" ? root.sand : root.turquoise
+                      font.family: root.panelFont
+                      font.pixelSize: modelData.action === "none" ? Style.font.caption : Style.font.body
+                      font.bold: true
+                    }
+                    MouseArea {
+                      id: volumeMouse
+                      anchors.fill: parent
+                      enabled: modelData.action !== "none"
+                      hoverEnabled: enabled
+                      cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                      onClicked: if (root.hostWidget)
+                        root.hostWidget.adjustVolume(modelData.action === "up" ? 2 : -2)
                     }
                   }
                 }
               }
+              Text {
+                anchors.horizontalCenter: parent.horizontalCenter
+                anchors.top: parent.top
+                anchors.topMargin: Style.space(3)
+                text: "VOLUME"
+                color: root.mutedSand
+                opacity: 0.75
+                font.family: root.panelFont
+                font.pixelSize: 8
+                font.letterSpacing: 0.8
+              }
+            }
+
+            Repeater {
+              model: [
+                { label: "SHUFFLE", value: root.hostWidget && root.hostWidget.shuffle ? "ON" : "OFF", action: "shuffle", active: root.hostWidget && root.hostWidget.shuffle },
+                { label: "REPEAT", value: root.hostWidget ? root.hostWidget.repeatMode.toUpperCase() : "OFF", action: "repeat", active: root.hostWidget && root.hostWidget.repeatMode.toLowerCase() !== "off" },
+                { label: "MONO", value: root.hostWidget && root.hostWidget.mono ? "ON" : "OFF", action: "mono", active: root.hostWidget && root.hostWidget.mono }
+              ]
+              Rectangle {
+                required property var modelData
+                width: (deckUtilityRow.width - volumeDeck.width - deckUtilityRow.spacing * 3) / 3
+                height: Style.space(48)
+                radius: Style.cornerRadius
+                color: modelData.active ? root.tint(root.turquoise, 0.14)
+                  : deckStatusMouse.containsMouse ? root.tint(root.adobe, 0.1) : root.tint(root.night, 0.42)
+                border.width: 1
+                border.color: modelData.active ? root.turquoise : root.tint(root.mutedSand, 0.2)
+                Column {
+                  anchors.centerIn: parent
+                  spacing: Style.space(2)
+                  Text {
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    text: modelData.label
+                    color: root.mutedSand
+                    font.family: root.panelFont
+                    font.pixelSize: 9
+                    font.bold: true
+                    font.letterSpacing: 1.1
+                  }
+                  Text {
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    text: modelData.value
+                    color: modelData.active ? root.turquoise : root.sand
+                    font.family: root.panelFont
+                    font.pixelSize: Style.font.caption
+                    font.bold: true
+                  }
+                }
+                MouseArea {
+                  id: deckStatusMouse
+                  anchors.fill: parent
+                  enabled: modelData.action !== "none"
+                  hoverEnabled: enabled
+                  cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                  onClicked: {
+                    if (!root.hostWidget) return
+                    if (modelData.action === "shuffle") root.hostWidget.toggleShuffle()
+                    else if (modelData.action === "repeat") root.hostWidget.cycleRepeat()
+                    else if (modelData.action === "mono") root.hostWidget.toggleMono()
+                  }
+                }
+              }
+            }
+          }
+
+              }
+            }
+
+            Rectangle {
+              id: browserSurface
+              width: workspaceRow.width - playerCard.width - workspaceRow.spacing
+              height: workspaceRow.height
+              radius: Style.cornerRadius
+              color: root.tint(root.night, 0.46)
+              border.width: 1
+              border.color: root.tint(root.turquoise, 0.2)
+
+              Flickable {
+                id: browserFlick
+                anchors.fill: parent
+                anchors.margins: Style.space(14)
+                contentWidth: width
+                contentHeight: browserColumn.implicitHeight
+                clip: true
+                boundsBehavior: Flickable.StopAtBounds
+                interactive: contentHeight > height
+
+                Column {
+                  id: browserColumn
+                  width: browserFlick.width
+                  spacing: Style.space(12)
+
+          Column {
+            width: parent.width
+            spacing: Style.space(10)
+            visible: root.libraryTab === "favorites"
+
+            Text {
+              text: "RADIO FAVORITES"
+              color: root.turquoise
+              font.family: root.panelFont
+              font.pixelSize: Style.font.caption
+              font.bold: true
+              font.letterSpacing: 1.2
+            }
+
+            Text {
+              width: parent.width
+              text: "Your starred Radio Browser stations. Manage stars here or while browsing the directory."
+              color: root.sand
+              opacity: 0.86
+              font.family: root.panelFont
+              font.pixelSize: Style.font.bodySmall
+              wrapMode: Text.WordWrap
+            }
+
+            Grid {
+              id: favoritesGrid
+              width: parent.width
+              columns: 2
+              spacing: Style.space(8)
+              visible: root.hostWidget && root.hostWidget.favoriteItems.length > 0
+              Repeater {
+                model: root.hostWidget ? root.hostWidget.favoriteItems : []
+                Rectangle {
+                  id: favoriteCard
+                  required property var modelData
+                  readonly property bool selected: root.hostWidget
+                    && root.hostWidget.loadedProviderPlaylistId === String(modelData.id)
+                  width: (favoritesGrid.width - favoritesGrid.spacing) / 2
+                  height: Style.space(54)
+                  radius: Style.cornerRadius
+                  color: selected ? root.tint(root.turquoise, 0.2)
+                    : favoritePlayMouse.containsMouse ? root.tint(root.adobe, 0.16)
+                    : root.tint(root.night, 0.46)
+                  border.width: 1
+                  border.color: selected ? root.turquoise
+                    : favoritePlayMouse.containsMouse ? root.adobe : root.tint(root.sand, 0.28)
+                  Text {
+                    anchors.left: parent.left
+                    anchors.right: favoriteRemove.left
+                    anchors.leftMargin: Style.space(12)
+                    anchors.rightMargin: Style.space(8)
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: String(modelData.name || modelData.id).replace(/^★\s*/, "").toUpperCase()
+                    color: root.sand
+                    font.family: root.panelFont
+                    font.pixelSize: Style.font.bodySmall
+                    font.bold: favoriteCard.selected
+                    elide: Text.ElideRight
+                  }
+                  Text {
+                    id: favoriteRemove
+                    anchors.right: parent.right
+                    anchors.rightMargin: Style.space(12)
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: "★"
+                    color: root.adobe
+                    font.family: root.panelFont
+                    font.pixelSize: Style.font.body
+                  }
+                  MouseArea {
+                    id: favoritePlayMouse
+                    anchors.fill: parent
+                    anchors.rightMargin: Style.space(42)
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: if (root.hostWidget) root.hostWidget.playFavorite(modelData)
+                  }
+                  MouseArea {
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+                    anchors.bottom: parent.bottom
+                    width: Style.space(42)
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: if (root.hostWidget) root.hostWidget.removeFavorite(modelData)
+                  }
+                }
+              }
+            }
+
+            Rectangle {
+              id: emptyFavoritesCard
+              width: parent.width
+              height: Style.space(150)
+              radius: Style.cornerRadius
+              color: emptyFavoritesMouse.containsMouse ? root.tint(root.turquoise, 0.1)
+                : root.tint(root.night, 0.32)
+              border.width: 1
+              border.color: emptyFavoritesMouse.containsMouse ? root.turquoise : root.tint(root.sand, 0.2)
+              visible: root.hostWidget && !root.hostWidget.providerBusy
+                && root.hostWidget.favoriteItems.length === 0
+              Column {
+                anchors.centerIn: parent
+                width: parent.width - Style.space(40)
+                spacing: Style.space(8)
+                Text {
+                  anchors.horizontalCenter: parent.horizontalCenter
+                  text: "NO FAVORITES YET"
+                  color: root.adobe
+                  font.family: root.panelFont
+                  font.pixelSize: Style.font.body
+                  font.bold: true
+                }
+                Text {
+                  width: parent.width
+                  text: "Open Browse and select ☆ beside a directory station. Click here to find stations."
+                  color: root.sand
+                  opacity: 0.84
+                  font.family: root.panelFont
+                  font.pixelSize: Style.font.bodySmall
+                  horizontalAlignment: Text.AlignHCenter
+                  wrapMode: Text.WordWrap
+                }
+              }
+              MouseArea {
+                id: emptyFavoritesMouse
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: {
+                  root.libraryTab = "providers"
+                  browserFlick.contentY = 0
+                  if (root.hostWidget) {
+                    if (root.hostWidget.selectedProviderKey !== "radio")
+                      root.hostWidget.selectProvider("radio")
+                    else if (root.hostWidget.catalogSize(root.hostWidget.providerPlaylists) === 0)
+                      root.hostWidget.loadRadioCatalog()
+                  }
+                }
+              }
+            }
+
+            Text {
+              visible: root.hostWidget && root.hostWidget.providerBusy
+              text: "LOADING FAVORITES…"
+              color: root.turquoise
+              font.family: root.panelFont
+              font.pixelSize: Style.font.caption
+              font.letterSpacing: 1.1
             }
           }
 
@@ -412,7 +854,7 @@ Panel {
             visible: root.libraryTab === "providers"
 
             Text {
-              text: "CLIAMP PROVIDER  ›  PLAYLISTS"
+              text: "SOURCES  ›  COLLECTIONS"
               color: root.turquoise
               font.family: root.panelFont
               font.pixelSize: Style.font.caption
@@ -431,19 +873,23 @@ Panel {
               font.letterSpacing: 1.1
             }
 
-            Row {
+            Grid {
+              id: sourceGrid
               width: parent.width
+              columns: Math.max(1, sourceRepeater.count)
               spacing: Style.space(7)
               Repeater {
+                id: sourceRepeater
                 model: root.hostWidget ? root.hostWidget.providers : []
                 Rectangle {
                   id: providerChip
                   required property var modelData
                   readonly property bool selected: root.hostWidget
                     && root.hostWidget.selectedProviderKey === modelData.key
-                  width: Math.max(Style.space(76), providerName.implicitWidth + Style.space(20))
-                  height: Style.space(32)
-                  radius: height / 2
+                  width: (sourceGrid.width - sourceGrid.spacing * (sourceRepeater.count - 1))
+                    / Math.max(1, sourceRepeater.count)
+                  height: Style.space(38)
+                  radius: Style.cornerRadius
                   color: selected ? root.tint(root.adobe, 0.22)
                     : providerMouse.containsMouse ? root.tint(root.turquoise, 0.12)
                     : root.tint(root.night, 0.46)
@@ -468,6 +914,203 @@ Panel {
                   }
                 }
               }
+            }
+
+            Text {
+              visible: root.hostWidget && root.hostWidget.selectedProviderKey === "radio"
+              text: "CLIAMP RADIO  ·  11 CHANNELS"
+              color: root.adobe
+              font.family: root.panelFont
+              font.pixelSize: Style.font.caption
+              font.bold: true
+              font.letterSpacing: 1.2
+            }
+            Grid {
+              id: cliampRadioGrid
+              width: parent.width
+              columns: 3
+              spacing: Style.space(7)
+              visible: root.hostWidget && root.hostWidget.selectedProviderKey === "radio"
+              Repeater {
+                model: root.hostWidget ? root.hostWidget.stations : []
+                Rectangle {
+                  id: radioChannelCard
+                  required property var modelData
+                  readonly property bool selected: root.hostWidget
+                    && root.hostWidget.selectedStation === String(modelData.name)
+                  width: (cliampRadioGrid.width - cliampRadioGrid.spacing * 2) / 3
+                  height: Style.space(44)
+                  radius: Style.cornerRadius
+                  color: selected ? root.tint(root.adobe, 0.22)
+                    : radioChannelMouse.containsMouse ? root.tint(root.turquoise, 0.14)
+                    : root.tint(root.night, 0.46)
+                  border.width: 1
+                  border.color: selected ? root.adobe
+                    : radioChannelMouse.containsMouse ? root.turquoise : root.tint(root.sand, 0.28)
+                  Text {
+                    anchors.centerIn: parent
+                    width: parent.width - Style.space(12)
+                    text: String(modelData.name).toUpperCase()
+                    color: root.sand
+                    font.family: root.panelFont
+                    font.pixelSize: Style.font.bodySmall
+                    font.bold: radioChannelCard.selected
+                    horizontalAlignment: Text.AlignHCenter
+                    elide: Text.ElideRight
+                  }
+                  MouseArea {
+                    id: radioChannelMouse
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: if (root.hostWidget) root.hostWidget.selectStation(modelData)
+                  }
+                }
+              }
+            }
+
+            Row {
+              width: parent.width
+              visible: root.hostWidget && root.hostWidget.selectedProviderKey === "radio"
+              spacing: Style.space(8)
+              Text {
+                width: parent.width - radioCatalogButton.width - Style.space(8)
+                anchors.verticalCenter: parent.verticalCenter
+                text: root.hostWidget && root.hostWidget.radioCatalogOffset > 0
+                  ? "RADIO BROWSER DIRECTORY  ·  " + root.hostWidget.radioCatalogOffset + " LOADED"
+                  : "RADIO BROWSER DIRECTORY"
+                color: root.turquoise
+                font.family: root.panelFont
+                font.pixelSize: Style.font.caption
+                font.bold: true
+                font.letterSpacing: 1.1
+                elide: Text.ElideRight
+              }
+              Rectangle {
+                id: radioCatalogButton
+                width: Style.space(132)
+                height: Style.space(34)
+                radius: Style.cornerRadius
+                color: radioCatalogMouse.containsMouse ? root.tint(root.turquoise, 0.2)
+                  : root.tint(root.night, 0.5)
+                border.width: 1
+                border.color: root.turquoise
+                Text {
+                  anchors.centerIn: parent
+                  text: root.hostWidget && root.hostWidget.providerBusy ? "LOADING…"
+                    : root.hostWidget && root.hostWidget.radioCatalogOffset > 0 ? "LOAD MORE" : "LOAD DIRECTORY"
+                  color: root.sand
+                  font.family: root.panelFont
+                  font.pixelSize: Style.font.caption
+                  font.bold: true
+                }
+                MouseArea {
+                  id: radioCatalogMouse
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  enabled: root.hostWidget && !root.hostWidget.providerBusy
+                    && root.hostWidget.radioCatalogHasMore
+                  cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                  onClicked: if (root.hostWidget) root.hostWidget.loadRadioCatalog()
+                }
+              }
+            }
+
+            Text {
+              visible: root.hostWidget && root.hostWidget.providerCollections.length > 0
+              text: root.hostWidget && root.hostWidget.selectedProviderKey === "local"
+                ? "LOCAL COLLECTIONS" : "DIRECTORY STATIONS"
+              color: root.adobe
+              font.family: root.panelFont
+              font.pixelSize: Style.font.caption
+              font.bold: true
+              font.letterSpacing: 1.2
+            }
+            Grid {
+              id: collectionsGrid
+              width: parent.width
+              columns: Math.max(1, Math.min(2, collectionRepeater.count))
+              spacing: Style.space(7)
+              visible: root.hostWidget && root.hostWidget.providerCollections.length > 0
+              Repeater {
+                id: collectionRepeater
+                model: root.hostWidget ? root.hostWidget.providerCollections : []
+                Rectangle {
+                  id: collectionCard
+                  required property var modelData
+                  readonly property bool selected: root.hostWidget
+                    && root.hostWidget.loadedProviderPlaylistId === String(modelData.id)
+                  readonly property bool favoritable: modelData.favoritable === true
+                    || String(modelData.id || "").indexOf("f:") === 0
+                  readonly property bool starred: modelData.favorite === true
+                    || String(modelData.name || "").indexOf("★") === 0
+                  width: (collectionsGrid.width - collectionsGrid.spacing * (collectionsGrid.columns - 1))
+                    / collectionsGrid.columns
+                  height: Style.space(48)
+                  radius: Style.cornerRadius
+                  color: selected ? root.tint(root.turquoise, 0.2)
+                    : collectionMouse.containsMouse ? root.tint(root.adobe, 0.18)
+                    : root.tint(root.night, 0.46)
+                  border.width: 1
+                  border.color: selected ? root.turquoise
+                    : collectionMouse.containsMouse ? root.adobe : root.tint(root.sand, 0.3)
+                  Text {
+                    anchors.left: parent.left
+                    anchors.right: collectionStar.visible ? collectionStar.left : parent.right
+                    anchors.leftMargin: Style.space(12)
+                    anchors.rightMargin: Style.space(8)
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: String(modelData.name || modelData.id).replace(/^★\s*/, "").toUpperCase()
+                    color: root.sand
+                    font.family: root.panelFont
+                    font.pixelSize: Style.font.bodySmall
+                    font.bold: collectionCard.selected
+                    horizontalAlignment: collectionStar.visible ? Text.AlignLeft : Text.AlignHCenter
+                    elide: Text.ElideRight
+                    maximumLineCount: 1
+                  }
+                  Text {
+                    id: collectionStar
+                    visible: collectionCard.favoritable
+                    anchors.right: parent.right
+                    anchors.rightMargin: Style.space(12)
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: collectionCard.starred ? "★" : "☆"
+                    color: collectionCard.starred ? root.adobe : root.turquoise
+                    font.family: root.panelFont
+                    font.pixelSize: Style.font.body
+                  }
+                  MouseArea {
+                    id: collectionMouse
+                    anchors.fill: parent
+                    anchors.rightMargin: collectionStar.visible ? Style.space(42) : 0
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: if (root.hostWidget) root.hostWidget.loadProviderPlaylist(modelData.id)
+                  }
+                  MouseArea {
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+                    anchors.bottom: parent.bottom
+                    width: Style.space(42)
+                    visible: collectionCard.favoritable
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: if (root.hostWidget) root.hostWidget.toggleProviderFavorite(modelData.id)
+                  }
+                }
+              }
+            }
+
+            Text {
+              visible: root.hostWidget && !root.hostWidget.providerBusy
+                && root.hostWidget.selectedProviderKey !== ""
+                && root.hostWidget.selectedProviderKey !== "radio"
+                && root.hostWidget.providerCollections.length === 0
+              text: "No saved collections are available from this source."
+              color: root.sand
+              opacity: 0.88
+              font.family: root.panelFont
+              font.pixelSize: Style.font.bodySmall
             }
 
             Row {
@@ -545,7 +1188,7 @@ Panel {
             Text {
               width: parent.width
               text: !root.selectedProviderSearchable()
-                ? "This CLIAMP provider exposes playlists but no search endpoint."
+                ? "This CLIAMP source exposes collections but no search endpoint."
                 : root.hostWidget && root.hostWidget.selectedProviderKey === "radio"
                   ? "Search finds stations inside CLIAMP's Radio provider."
                   : "Search matches CLIAMP's Local library—not a folder path. Use Files to browse your disk."
@@ -556,78 +1199,12 @@ Panel {
               wrapMode: Text.WordWrap
             }
 
-            Text {
-              visible: root.hostWidget && root.hostWidget.providerPlaylists.length > 0
-              text: (root.hostWidget ? root.hostWidget.selectedProviderKey.toUpperCase() : "SELECTED")
-                + " PLAYLISTS"
-              color: root.adobe
-              font.family: root.panelFont
-              font.pixelSize: Style.font.caption
-              font.bold: true
-              font.letterSpacing: 1.2
-            }
-            Flow {
-              width: parent.width
-              spacing: Style.space(7)
-              visible: root.hostWidget && root.hostWidget.providerPlaylists.length > 0
-              Repeater {
-                model: root.hostWidget ? root.hostWidget.providerPlaylists : []
-                Rectangle {
-                  id: playlistChip
-                  required property var modelData
-                  readonly property bool selected: root.hostWidget
-                    && root.hostWidget.loadedProviderPlaylistId === String(modelData.id)
-                  width: Math.min(contentColumn.width, playlistName.implicitWidth + Style.space(22))
-                  height: Style.space(31)
-                  radius: height / 2
-                  color: selected ? root.tint(root.turquoise, 0.2)
-                    : playlistMouse.containsMouse ? root.tint(root.adobe, 0.22)
-                    : root.tint(root.night, 0.46)
-                  border.width: 1
-                  border.color: selected ? root.turquoise
-                    : playlistMouse.containsMouse ? root.adobe : root.tint(root.sand, 0.3)
-                  Text {
-                    id: playlistName
-                    anchors.centerIn: parent
-                    width: parent.width - Style.space(18)
-                    text: String(modelData.name || modelData.id)
-                    color: root.sand
-                    opacity: playlistChip.selected || playlistMouse.containsMouse ? 1 : 0.9
-                    font.family: root.panelFont
-                    font.pixelSize: Style.font.caption
-                    font.bold: playlistChip.selected
-                    horizontalAlignment: Text.AlignHCenter
-                    elide: Text.ElideRight
-                    maximumLineCount: 1
-                  }
-                  MouseArea {
-                    id: playlistMouse
-                    anchors.fill: parent
-                    hoverEnabled: true
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: if (root.hostWidget) root.hostWidget.loadProviderPlaylist(modelData.id)
-                  }
-                }
-              }
-            }
-
-            Text {
-              visible: root.hostWidget && !root.hostWidget.providerBusy
-                && root.hostWidget.selectedProviderKey !== ""
-                && root.hostWidget.providerPlaylists.length === 0
-              text: "No playlists are available from this provider."
-              color: root.sand
-              opacity: 0.88
-              font.family: root.panelFont
-              font.pixelSize: Style.font.bodySmall
-            }
-
             Column {
               width: parent.width
               spacing: Style.space(5)
               visible: root.hostWidget && root.hostWidget.providerResults.length > 0
               Text {
-                text: "SEARCH RESULTS  ·  CLICK A TRACK TO PLAY"
+              text: "SEARCH RESULTS  ·  PLAY OR STAR A STATION"
                 color: root.turquoise
                 font.family: root.panelFont
                 font.pixelSize: Style.font.caption
@@ -638,44 +1215,73 @@ Panel {
                 model: root.hostWidget ? root.hostWidget.providerResults : []
                 Rectangle {
                   required property var modelData
-                  width: contentColumn.width
+                  readonly property bool favoritable: root.hostWidget
+                    && root.hostWidget.selectedProviderKey === "radio"
+                  readonly property bool starred: favoritable
+                    && root.hostWidget.isSearchFavorite(modelData)
+                  width: browserColumn.width
                   height: Style.space(38)
                   radius: Style.cornerRadius
                   color: resultMouse.containsMouse ? root.tint(root.turquoise, 0.1) : "transparent"
                   border.width: 1
                   border.color: resultMouse.containsMouse
                     ? root.tint(root.turquoise, 0.55) : root.tint(root.sand, 0.18)
-                  Row {
-                    anchors.fill: parent
+                  Text {
+                    anchors.left: parent.left
+                    anchors.right: resultDetail.left
                     anchors.leftMargin: Style.space(10)
-                    anchors.rightMargin: Style.space(10)
-                    Text {
-                      width: parent.width * 0.62
-                      anchors.verticalCenter: parent.verticalCenter
-                      text: modelData.title || modelData.path
-                      color: root.sand
-                      font.family: root.panelFont
-                      font.pixelSize: Style.font.bodySmall
-                      elide: Text.ElideRight
-                    }
-                    Text {
-                      width: parent.width * 0.38
-                      anchors.verticalCenter: parent.verticalCenter
-                      text: modelData.artist || "PLAY"
-                      color: root.sand
-                      opacity: 0.86
-                      font.family: root.panelFont
-                      font.pixelSize: Style.font.caption
-                      horizontalAlignment: Text.AlignRight
-                      elide: Text.ElideRight
-                    }
+                    anchors.rightMargin: Style.space(8)
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: modelData.title || modelData.path
+                    color: root.sand
+                    font.family: root.panelFont
+                    font.pixelSize: Style.font.bodySmall
+                    elide: Text.ElideRight
+                  }
+                  Text {
+                    id: resultDetail
+                    width: parent.width * 0.28
+                    anchors.right: resultStar.left
+                    anchors.rightMargin: Style.space(6)
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: modelData.artist || "PLAY"
+                    color: root.sand
+                    opacity: 0.86
+                    font.family: root.panelFont
+                    font.pixelSize: Style.font.caption
+                    horizontalAlignment: Text.AlignRight
+                    elide: Text.ElideRight
+                  }
+                  Text {
+                    id: resultStar
+                    width: favoritable ? Style.space(34) : 0
+                    anchors.right: parent.right
+                    anchors.rightMargin: favoritable ? Style.space(5) : 0
+                    anchors.verticalCenter: parent.verticalCenter
+                    visible: favoritable
+                    text: starred ? "★" : "☆"
+                    color: starred ? root.adobe : root.turquoise
+                    font.family: root.panelFont
+                    font.pixelSize: Style.font.body
+                    horizontalAlignment: Text.AlignHCenter
                   }
                   MouseArea {
                     id: resultMouse
                     anchors.fill: parent
+                    anchors.rightMargin: favoritable ? Style.space(42) : 0
                     hoverEnabled: true
                     cursorShape: Qt.PointingHandCursor
                     onClicked: if (root.hostWidget) root.hostWidget.playProviderTrack(modelData)
+                  }
+                  MouseArea {
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+                    anchors.bottom: parent.bottom
+                    width: Style.space(42)
+                    visible: favoritable
+                    enabled: visible && root.hostWidget && !root.hostWidget.searchFavoritesBusy
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: if (root.hostWidget) root.hostWidget.toggleSearchFavorite(modelData)
                   }
                 }
               }
@@ -756,7 +1362,7 @@ Panel {
                 required property int index
                 readonly property int trackIndex: index
                 readonly property bool current: root.hostWidget && root.hostWidget.currentIndex === index
-                width: contentColumn.width
+                width: browserColumn.width
                 height: Style.space(42)
                 radius: Style.cornerRadius
                 color: current ? root.tint(root.turquoise, 0.13)
@@ -827,7 +1433,7 @@ Panel {
             Text {
               visible: root.hostWidget && root.hostWidget.queueTracks.length === 0
               width: parent.width
-              text: "Queue is empty. Choose a station, provider playlist, files, or a folder."
+              text: "Queue is empty. Choose a station, collection, files, or a folder."
               color: root.mutedSand
               font.family: root.panelFont
               font.pixelSize: Style.font.bodySmall
@@ -856,7 +1462,7 @@ Panel {
                 model: root.hostWidget ? root.hostWidget.audioDevices : []
                 Rectangle {
                   required property var modelData
-                  width: Math.min(contentColumn.width, deviceName.implicitWidth + Style.space(24))
+                  width: Math.min(browserColumn.width, deviceName.implicitWidth + Style.space(24))
                   height: Style.space(30)
                   radius: height / 2
                   color: modelData.active ? root.tint(root.turquoise, 0.18) : "transparent"
@@ -899,7 +1505,7 @@ Panel {
               model: root.hostWidget ? root.hostWidget.historyItems : []
               Rectangle {
                 required property var modelData
-                width: contentColumn.width
+                width: browserColumn.width
                 height: Style.space(34)
                 radius: Style.cornerRadius
                 color: historyMouse.containsMouse ? root.tint(root.turquoise, 0.09) : "transparent"
@@ -963,7 +1569,7 @@ Panel {
 
           Rectangle {
             width: parent.width
-            height: Style.space(root.filePickerStatus === "" ? 104 : 128)
+            height: browserFlick.height
             radius: Style.cornerRadius
             visible: root.libraryTab === "files"
             color: root.tint(root.night, 0.48)
@@ -971,6 +1577,7 @@ Panel {
             border.color: root.tint(root.turquoise, 0.28)
             Column {
               anchors.centerIn: parent
+              width: parent.width - Style.space(28)
               spacing: Style.space(8)
               Text {
                 anchors.horizontalCenter: parent.horizontalCenter
@@ -981,7 +1588,8 @@ Panel {
                 font.bold: true
               }
               Row {
-                anchors.horizontalCenter: parent.horizontalCenter
+                id: fileActionRow
+                width: parent.width
                 spacing: Style.space(8)
                 Repeater {
                   model: [
@@ -991,8 +1599,8 @@ Panel {
                   Rectangle {
                     required property var modelData
                     readonly property bool available: root.hostWidget && root.hostWidget.sessionReady
-                    width: Style.space(142)
-                    height: Style.space(34)
+                    width: (fileActionRow.width - fileActionRow.spacing) / 2
+                    height: Style.space(46)
                     radius: Style.cornerRadius
                     color: pickerMouse.containsMouse
                       ? root.tint(root.adobe, 0.22) : root.tint(root.adobe, 0.12)
@@ -1020,7 +1628,7 @@ Panel {
               }
               Text {
                 anchors.horizontalCenter: parent.horizontalCenter
-                width: Math.min(contentColumn.width - Style.space(30), implicitWidth)
+                width: Math.min(browserColumn.width - Style.space(30), implicitWidth)
                 visible: root.filePickerStatus !== ""
                 text: root.filePickerStatus
                 color: root.filePickerFailed ? root.adobe : root.turquoise
@@ -1028,100 +1636,6 @@ Panel {
                 font.pixelSize: Style.font.caption
                 horizontalAlignment: Text.AlignHCenter
                 wrapMode: Text.WordWrap
-              }
-            }
-          }
-
-          Row {
-            width: parent.width
-            spacing: Style.space(8)
-            visible: root.libraryTab === "more"
-            Text {
-              width: Style.space(60)
-              anchors.verticalCenter: parent.verticalCenter
-              text: "SPEED"
-              color: root.turquoise
-              font.family: root.panelFont
-              font.pixelSize: Style.font.caption
-              font.bold: true
-              font.letterSpacing: 1.2
-            }
-            Repeater {
-              model: [0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2]
-              Rectangle {
-                required property real modelData
-                readonly property bool selected: root.hostWidget
-                  && Math.abs(root.hostWidget.playbackSpeed - modelData) < 0.01
-                width: Style.space(48)
-                height: Style.space(30)
-                radius: Style.cornerRadius
-                color: selected ? root.tint(root.turquoise, 0.18) : "transparent"
-                border.width: 1
-                border.color: selected ? root.turquoise : root.tint(root.mutedSand, 0.22)
-                Text {
-                  anchors.centerIn: parent
-                  text: modelData + "×"
-                  color: selected ? root.sand : root.mutedSand
-                  font.family: root.panelFont
-                  font.pixelSize: Style.font.caption
-                }
-                MouseArea {
-                  anchors.fill: parent
-                  cursorShape: Qt.PointingHandCursor
-                  onClicked: if (root.hostWidget) root.hostWidget.setSpeed(modelData)
-                }
-              }
-            }
-          }
-
-          Text {
-            width: parent.width
-            visible: root.libraryTab === "more"
-            text: "EQUALIZER  ·  " + (root.hostWidget ? root.hostWidget.eqPreset.toUpperCase() : "FLAT")
-            color: root.adobe
-            font.family: root.panelFont
-            font.pixelSize: Style.font.caption
-            font.bold: true
-            font.letterSpacing: 1.2
-          }
-
-          Grid {
-            width: parent.width
-            columns: 4
-            spacing: Style.space(7)
-            visible: root.libraryTab === "more"
-            Repeater {
-              model: [
-                "Flat", "Rock", "Pop", "Jazz",
-                "Classical", "Bass Boost", "Treble Boost", "Vocal",
-                "Electronic", "Acoustic", "Hip-Hop", "R&B",
-                "Loudness", "Late Night", "Podcast", "Small Speakers"
-              ]
-              Rectangle {
-                required property string modelData
-                readonly property bool selected: root.hostWidget
-                  && root.hostWidget.eqPreset.toLowerCase() === modelData.toLowerCase()
-                width: (contentColumn.width - Style.space(21)) / 4
-                height: Style.space(30)
-                radius: Style.cornerRadius
-                color: selected ? root.tint(root.adobe, 0.2) : "transparent"
-                border.width: 1
-                border.color: selected ? root.adobe : root.tint(root.mutedSand, 0.2)
-                Text {
-                  anchors.centerIn: parent
-                  width: parent.width - 4
-                  text: modelData.toUpperCase()
-                  color: selected ? root.sand : root.mutedSand
-                  font.family: root.panelFont
-                  font.pixelSize: 10
-                  horizontalAlignment: Text.AlignHCenter
-                  elide: Text.ElideRight
-                }
-                MouseArea {
-                  anchors.fill: parent
-                  cursorShape: Qt.PointingHandCursor
-                  onClicked: if (root.hostWidget) root.hostWidget.setEqPreset(modelData)
-                }
               }
             }
           }
@@ -1141,14 +1655,13 @@ Panel {
                   { title: "SHUFFLE", active: root.hostWidget && root.hostWidget.shuffle, action: "shuffle" },
                   { title: "REPEAT " + (root.hostWidget ? root.hostWidget.repeatMode.toUpperCase() : "OFF"), active: root.hostWidget && root.hostWidget.repeatMode.toLowerCase() !== "off", action: "repeat" }
                 ]
-                if (root.hostWidget && root.hostWidget.sessionMode === "tui")
-                  controls.push({ title: "VIS " + root.hostWidget.visualizerMode.toUpperCase(), active: false, action: "visualizer" })
+                controls.push({ title: "VIS " + (root.hostWidget ? root.hostWidget.panelVisualizerName.toUpperCase() : "MESA"), active: false, action: "visualizer" })
                 controls.push({ title: "MONO", active: root.hostWidget && root.hostWidget.mono, action: "mono" })
                 return controls
               }
               Rectangle {
                 required property var modelData
-                width: (contentColumn.width - utilityRow.spacing * (utilityRepeater.count - 1)) / utilityRepeater.count
+                width: (browserColumn.width - utilityRow.spacing * (utilityRepeater.count - 1)) / utilityRepeater.count
                 height: Style.space(34)
                 radius: Style.cornerRadius
                 color: modelData.active ? root.tint(root.turquoise, 0.17)
@@ -1257,66 +1770,6 @@ Panel {
           }
 
           Text {
-            text: "CURATED STATIONS"
-            visible: root.libraryTab === "radio"
-            color: root.turquoise
-            font.family: root.panelFont
-            font.pixelSize: Style.font.caption
-            font.bold: true
-            font.letterSpacing: 1.8
-          }
-
-          Grid {
-            width: parent.width
-            columns: 3
-            spacing: Style.space(8)
-            visible: root.libraryTab === "radio"
-            Repeater {
-              model: root.hostWidget ? root.hostWidget.stations : []
-              Rectangle {
-                required property var modelData
-                readonly property bool selected: root.hostWidget
-                  && root.hostWidget.selectedStation === modelData.name
-                width: (contentColumn.width - Style.space(16)) / 3
-                height: Style.space(56)
-                radius: Style.cornerRadius
-                color: selected ? root.tint(root.adobe, 0.18)
-                  : stationMouse.containsMouse ? root.tint(root.turquoise, 0.1) : "transparent"
-                border.width: 1
-                border.color: selected ? root.adobe : root.tint(root.mutedSand, 0.22)
-                Column {
-                  anchors.centerIn: parent
-                  width: parent.width - Style.space(12)
-                  spacing: Style.space(2)
-                  Text {
-                    anchors.horizontalCenter: parent.horizontalCenter
-                    text: modelData.name.toUpperCase()
-                    color: selected ? root.sand : root.mutedSand
-                    font.family: root.panelFont
-                    font.pixelSize: Style.font.bodySmall
-                    font.bold: selected
-                  }
-                  Text {
-                    anchors.horizontalCenter: parent.horizontalCenter
-                    text: modelData.detail
-                    color: selected ? root.adobe : root.mutedSand
-                    opacity: selected ? 1 : 0.9
-                    font.family: root.panelFont
-                    font.pixelSize: Style.font.caption
-                  }
-                }
-                MouseArea {
-                  id: stationMouse
-                  anchors.fill: parent
-                  hoverEnabled: true
-                  cursorShape: Qt.PointingHandCursor
-                  onClicked: if (root.hostWidget) root.hostWidget.selectStation(modelData)
-                }
-              }
-            }
-          }
-
-          Text {
             visible: root.hostWidget && root.hostWidget.errorText !== ""
             width: parent.width
             text: root.hostWidget ? root.hostWidget.errorText : ""
@@ -1324,6 +1777,11 @@ Panel {
             font.family: root.panelFont
             font.pixelSize: Style.font.bodySmall
             horizontalAlignment: Text.AlignHCenter
+          }
+
+                }
+              }
+            }
           }
 
           Text {
