@@ -2,7 +2,7 @@
 
 CLIAMPed is a theme-aware Omarchy bar widget and control center for [CLIAMP](https://github.com/bjarneo/cliamp). It follows the active Omarchy theme while bringing CLIAMP playback, providers, local media, and a 32-column multi-frequency visualizer into the shell.
 
-The high-desert presentation is CLIAMPed's visual personality; its colors come from the current theme rather than a bundled palette.
+Its visualizer and controls take their colors from the current Omarchy theme rather than a bundled palette.
 
 ## Features
 
@@ -18,6 +18,14 @@ The high-desert presentation is CLIAMPed's visual personality; its colors come f
 - A self-started background daemon when CLIAMP is not already running
 
 CLIAMPed uses CLIAMP's newline-framed Unix-socket IPC and serializes requests so concurrent panel actions cannot corrupt responses. File and folder selection runs in a separate Zenity process, keeping native picker failures outside Quickshell.
+
+## Theme gallery
+
+CLIAMPed reads its panel, text, accent, urgent, and bar colors from Omarchy, so the same controls adapt to both dark and light themes.
+
+| Hacker Bunker | Catppuccin Latte | Santa Fe |
+|:---:|:---:|:---:|
+| ![CLIAMPed in Hacker Bunker](screenshots/cliamped-hacker-bunker.png) | ![CLIAMPed in Catppuccin Latte](screenshots/cliamped-catppuccin-latte.png) | ![CLIAMPed in Santa Fe](screenshots/cliamped-santa-fe.png) |
 
 ## Stations, providers, and playlists
 

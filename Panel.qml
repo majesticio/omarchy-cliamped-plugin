@@ -182,7 +182,7 @@ Panel {
                 font.letterSpacing: 2.2
               }
               Text {
-                text: "CLIAMP ON THE HIGH DESERT AIRWAVES"
+                text: "YOUR MUSIC, FULLY CLIAMPED"
                 color: root.mutedSand
                 font.family: root.panelFont
                 font.pixelSize: Style.font.bodySmall
