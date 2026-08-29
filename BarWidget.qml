@@ -62,6 +62,7 @@ BarWidget {
   property var ipcQueue: []
   property var ipcCurrent: null
   property bool ipcBusy: false
+  property bool volumeDirty: false
   property var pendingAfterStart: null
   property int startupAttempts: 0
 
@@ -112,6 +113,25 @@ BarWidget {
     syncProviderBusy()
     pumpIpc()
     return true
+  }
+
+  function enqueueVolume(target) {
+    var pending = ipcQueue.filter(function(item) { return item.kind !== "volumeAction" })
+    pending.push({
+      kind: "volumeAction",
+      request: { cmd: "volume", value: target },
+      fallback: ["volume", String(target)]
+    })
+    ipcQueue = pending
+    volumeDirty = true
+    pumpIpc()
+  }
+
+  function volumeRequestPending() {
+    if (ipcCurrent && ipcCurrent.kind === "volumeAction") return true
+    for (var i = 0; i < ipcQueue.length; ++i)
+      if (ipcQueue[i].kind === "volumeAction") return true
+    return false
   }
 
   function pumpIpc() {
@@ -236,7 +256,8 @@ BarWidget {
       errorText = ""
       if (!modeKnown && !modeProbe.running) modeProbe.running = true
       state = String(value.state || "stopped").toLowerCase()
-      volumeDb = value.volume === undefined ? volumeDb : Number(value.volume)
+      if (value.volume !== undefined && !volumeDirty && !volumeRequestPending())
+        volumeDb = Number(value.volume)
       shuffle = value.shuffle === true
       repeatMode = String(value.repeat || "Off")
       mono = value.mono === true
@@ -297,7 +318,11 @@ BarWidget {
   function previous() { if (sessionReady) runAction(["prev"]) }
   function stop() { if (sessionReady) runAction(["stop"]) }
   function adjustVolume(delta) {
-    if (sessionReady) runAction(["volume", String(delta)])
+    if (!sessionReady) return
+    var target = Math.max(-30, Math.min(6, volumeDb + Number(delta || 0)))
+    if (target === volumeDb) return
+    volumeDb = target
+    volumeCommit.restart()
   }
   function toggleShuffle() { if (sessionReady) runAction(["shuffle", "toggle"]) }
   function cycleRepeat() { if (sessionReady) runAction(["repeat", "cycle"]) }
@@ -385,7 +410,7 @@ BarWidget {
     id: panelLoader
     active: true
     // Keep this query aligned with manifest.json so Qt drops stale panel components on updates.
-    source: Qt.resolvedUrl("Panel.qml") + "?v=1.0.2"
+    source: Qt.resolvedUrl("Panel.qml") + "?v=1.0.3"
     visible: false
     onLoaded: {
       root.injectPanel()
@@ -445,6 +470,16 @@ BarWidget {
       if (b === Qt.MiddleButton) root.togglePlayback()
       else if (b === Qt.RightButton) root.next()
       else root.togglePanel()
+    }
+
+    // The bar adds its own left-button gesture layer for module reordering.
+    // Keep middle-button playback independent of that layered dispatch so it
+    // remains reliable as the bar's pointer handling evolves.
+    MouseArea {
+      anchors.fill: parent
+      acceptedButtons: Qt.MiddleButton
+      cursorShape: Qt.PointingHandCursor
+      onPressed: root.togglePlayback()
     }
   }
 
@@ -535,7 +570,12 @@ BarWidget {
         root.lyricLines = response.lyrics || []
       } else if (kind === "devices") {
         root.audioDevices = response.devices || []
-      } else if (kind === "action" || kind === "deviceSet") {
+      } else if (kind === "action" || kind === "deviceSet" || kind === "volumeAction") {
+        if (kind === "volumeAction") {
+          root.volumeDirty = false
+          for (var i = 0; i < root.ipcQueue.length; ++i)
+            if (root.ipcQueue[i].kind === "volumeAction") root.volumeDirty = true
+        }
         actionRefresh.restart()
       }
       if (kind === "load" || kind === "play" || kind === "queueMutation") queueRefresh.restart()
@@ -609,6 +649,11 @@ BarWidget {
     }
   }
   Timer { id: actionRefresh; interval: 250; onTriggered: root.probe() }
+  Timer {
+    id: volumeCommit
+    interval: 90
+    onTriggered: root.enqueueVolume(root.volumeDb)
+  }
   Timer { id: queueRefresh; interval: 350; onTriggered: root.refreshQueue() }
   Timer {
     interval: 2200

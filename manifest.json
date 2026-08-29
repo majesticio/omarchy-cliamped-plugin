@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.majesticio.cliamped",
   "name": "CLIAMPed",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "author": "majesticio",
   "license": "MIT",
   "description": "A full CLIAMP control center with providers, queue, files and folders, and a live multi-band spectrum",

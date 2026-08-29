@@ -65,6 +65,7 @@ Panel {
   function openFromHotkey() { open() }
   function close() { controller.hide() }
   function toggle() { opened ? close() : open() }
+  function returnToPanelKeys() { keyCatcher.forceActiveFocus() }
   function switchPanel(direction) {
     if (bar && typeof bar.switchPanelFrom === "function")
       return bar.switchPanelFrom(barIdentity, direction)
@@ -388,6 +389,7 @@ Panel {
                   cursorShape: Qt.PointingHandCursor
                   onClicked: {
                     root.libraryTab = modelData.key
+                    root.returnToPanelKeys()
                     if (modelData.key === "providers" && root.hostWidget
                         && !root.hostWidget.providers.length)
                       root.hostWidget.refreshProviders()
@@ -501,7 +503,13 @@ Panel {
                     opacity: 0.82
                     font: providerSearch.font
                   }
-                  Keys.onReturnPressed: if (root.hostWidget) root.hostWidget.searchProvider(text)
+                  Keys.onReturnPressed: {
+                    if (root.hostWidget) root.hostWidget.searchProvider(text)
+                    root.returnToPanelKeys()
+                  }
+                  Keys.onUpPressed: if (root.hostWidget) root.hostWidget.adjustVolume(2)
+                  Keys.onDownPressed: if (root.hostWidget) root.hostWidget.adjustVolume(-2)
+                  Keys.onEscapePressed: root.returnToPanelKeys()
                 }
               }
               Rectangle {
@@ -526,7 +534,10 @@ Panel {
                   anchors.fill: parent
                   enabled: providerSearchButton.available
                   cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
-                  onClicked: if (root.hostWidget) root.hostWidget.searchProvider(providerSearch.text)
+                  onClicked: {
+                    if (root.hostWidget) root.hostWidget.searchProvider(providerSearch.text)
+                    root.returnToPanelKeys()
+                  }
                 }
               }
             }
@@ -1207,7 +1218,11 @@ Panel {
                 Keys.onReturnPressed: {
                   if (root.hostWidget) root.hostWidget.queueMedia(text)
                   text = ""
+                  root.returnToPanelKeys()
                 }
+                Keys.onUpPressed: if (root.hostWidget) root.hostWidget.adjustVolume(2)
+                Keys.onDownPressed: if (root.hostWidget) root.hostWidget.adjustVolume(-2)
+                Keys.onEscapePressed: root.returnToPanelKeys()
               }
             }
             Rectangle {
@@ -1235,6 +1250,7 @@ Panel {
                 onClicked: {
                   if (root.hostWidget) root.hostWidget.queueMedia(queueInput.text)
                   queueInput.text = ""
+                  root.returnToPanelKeys()
                 }
               }
             }
