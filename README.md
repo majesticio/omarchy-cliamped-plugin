@@ -89,6 +89,16 @@ Focused panel:
 - V: cycle CLIAMP's visualizer only when attached to a TUI; CLIAMP does not expose visualizer switching in daemon mode
 - Escape: close the panel
 
+Shell IPC:
+
+```bash
+omarchy-shell io.github.majesticio.cliamped open
+omarchy-shell io.github.majesticio.cliamped tab providers
+omarchy-shell io.github.majesticio.cliamped close
+```
+
+The `tab` endpoint accepts `radio`, `providers`, `queue`, `files`, or `more`.
+
 ## Development
 
 Validate the package and run its helper tests:

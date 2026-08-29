@@ -50,6 +50,7 @@ BarWidget {
   property var providerPlaylists: []
   property var providerResults: []
   property string selectedProviderKey: ""
+  property string loadedProviderPlaylistId: ""
   property string providerRequestKind: ""
   property bool providerBusy: false
   property bool providerSearchAttempted: false
@@ -143,6 +144,7 @@ BarWidget {
 
   function selectProvider(key) {
     selectedProviderKey = String(key || "")
+    loadedProviderPlaylistId = ""
     providerPlaylists = []
     providerResults = []
     providerSearchAttempted = false
@@ -169,17 +171,20 @@ BarWidget {
 
   function playProviderTrack(track) {
     if (!track || !track.path) return
+    loadedProviderPlaylistId = ""
     enqueueIpc("play", { cmd: "track.play", track: track }, [])
   }
 
   function playLocalFile(filePath) {
     var path = String(filePath || "")
     if (!path) return
+    loadedProviderPlaylistId = ""
     enqueueIpc("play", { cmd: "track.play", track: { path: path } }, [])
   }
 
   function playLocalFiles(paths) {
     if (!paths || !paths.length) return
+    loadedProviderPlaylistId = ""
     for (var i = 0; i < paths.length; ++i) {
       var path = String(paths[i] || "")
       if (!path) continue
@@ -196,7 +201,10 @@ BarWidget {
   function clearQueue() { enqueueIpc("queueMutation", { cmd: "queue.clear" }, []) }
   function refreshHistory() { enqueueIpc("history", { cmd: "history", limit: 24 }, []) }
   function playHistoryItem(item) {
-    if (item && item.track) enqueueIpc("play", { cmd: "track.play", track: item.track }, [])
+    if (item && item.track) {
+      loadedProviderPlaylistId = ""
+      enqueueIpc("play", { cmd: "track.play", track: item.track }, [])
+    }
   }
   function refreshLyrics() { enqueueIpc("lyrics", { cmd: "lyrics" }, []) }
   function refreshDevices() { enqueueIpc("devices", { cmd: "device", name: "list" }, ["device", "list"]) }
@@ -322,6 +330,7 @@ BarWidget {
 
   function selectStation(station) {
     if (!station || !station.url) return
+    loadedProviderPlaylistId = ""
     errorText = ""
     providerError = ""
     if (!sessionReady) {
@@ -340,6 +349,20 @@ BarWidget {
 
   function togglePanel() {
     if (panelLoader.item && panelLoader.item.toggle) panelLoader.item.toggle()
+  }
+  function openTab(tab) {
+    var target = panelLoader.item
+    if (!target) return "unavailable"
+    target.libraryTab = String(tab || "radio")
+    if (target.libraryTab === "providers" && !providers.length) refreshProviders()
+    else if (target.libraryTab === "queue") refreshQueue()
+    else if (target.libraryTab === "more") {
+      refreshHistory()
+      refreshLyrics()
+      refreshDevices()
+    }
+    target.open()
+    return "ok"
   }
   function open() { if (panelLoader.item && panelLoader.item.openFromHotkey) panelLoader.item.openFromHotkey() }
   function close() { if (panelLoader.item && panelLoader.item.close) panelLoader.item.close() }
@@ -362,7 +385,7 @@ BarWidget {
     id: panelLoader
     active: true
     // Keep this query aligned with manifest.json so Qt drops stale panel components on updates.
-    source: Qt.resolvedUrl("Panel.qml") + "?v=1.0.1"
+    source: Qt.resolvedUrl("Panel.qml") + "?v=1.0.2"
     visible: false
     onLoaded: {
       root.injectPanel()
@@ -425,6 +448,17 @@ BarWidget {
     }
   }
 
+  IpcHandler {
+    target: root.moduleName
+
+    function open(): void { root.open() }
+    function close(): void { root.close() }
+    function show(): void { root.open() }
+    function hide(): void { root.close() }
+    function toggle(): void { root.togglePanel() }
+    function tab(name: string): string { return root.openTab(name) }
+  }
+
   Process {
     id: statusProbe
     command: ["cliamp", "status", "--json"]
@@ -483,6 +517,8 @@ BarWidget {
         root.providerResults = response.tracks || []
       } else if (kind === "load") {
         root.providerError = ""
+        root.loadedProviderPlaylistId = current && current.request
+          ? String(current.request.playlist || "") : ""
         root.queueTracks = response.tracks || []
         root.currentIndex = root.queueTracks.length ? 0 : -1
         actionRefresh.restart()

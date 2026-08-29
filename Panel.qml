@@ -18,7 +18,10 @@ Panel {
   property string pickerMode: "files"
   readonly property var barIdentity: hostWidget || root
   readonly property color sand: bar ? bar.foreground : Color.popups.text
-  readonly property color mutedSand: Color.muted
+  // Omarchy's muted token is deliberately subtle and can be nearly invisible in
+  // some themes. Blend it toward the active foreground so secondary information
+  // remains recognizably muted without sacrificing readability.
+  readonly property color mutedSand: Qt.tint(Color.muted, root.tint(sand, 0.72))
   readonly property color turquoise: Color.accent
   readonly property color adobe: bar ? bar.urgent : Color.urgent
   readonly property color night: Color.popups.background
@@ -419,7 +422,8 @@ Panel {
               visible: root.hostWidget && root.hostWidget.providerBusy
               text: "LOADING " + (root.hostWidget && root.hostWidget.selectedProviderKey
                 ? root.hostWidget.selectedProviderKey.toUpperCase() : "PROVIDERS") + "…"
-              color: root.mutedSand
+              color: root.turquoise
+              opacity: 0.9
               font.family: root.panelFont
               font.pixelSize: Style.font.caption
               font.letterSpacing: 1.1
@@ -431,25 +435,32 @@ Panel {
               Repeater {
                 model: root.hostWidget ? root.hostWidget.providers : []
                 Rectangle {
+                  id: providerChip
                   required property var modelData
                   readonly property bool selected: root.hostWidget
                     && root.hostWidget.selectedProviderKey === modelData.key
                   width: Math.max(Style.space(76), providerName.implicitWidth + Style.space(20))
                   height: Style.space(32)
                   radius: height / 2
-                  color: selected ? root.tint(root.adobe, 0.2) : "transparent"
+                  color: selected ? root.tint(root.adobe, 0.22)
+                    : providerMouse.containsMouse ? root.tint(root.turquoise, 0.12)
+                    : root.tint(root.night, 0.46)
                   border.width: 1
-                  border.color: selected ? root.adobe : root.tint(root.mutedSand, 0.25)
+                  border.color: selected ? root.adobe
+                    : providerMouse.containsMouse ? root.turquoise : root.tint(root.sand, 0.34)
                   Text {
                     id: providerName
                     anchors.centerIn: parent
                     text: String(modelData.name || modelData.key).toUpperCase()
-                    color: selected ? root.sand : root.mutedSand
+                    color: root.sand
+                    opacity: providerChip.selected || providerMouse.containsMouse ? 1 : 0.88
                     font.family: root.panelFont
                     font.pixelSize: Style.font.caption
                   }
                   MouseArea {
+                    id: providerMouse
                     anchors.fill: parent
+                    hoverEnabled: true
                     cursorShape: Qt.PointingHandCursor
                     onClicked: if (root.hostWidget) root.hostWidget.selectProvider(modelData.key)
                   }
@@ -466,10 +477,10 @@ Panel {
                 radius: Style.cornerRadius
                 color: root.tint(root.night, 0.5)
                 border.width: 1
-                border.color: providerSearch.activeFocus ? root.turquoise : root.tint(root.mutedSand, 0.24)
-              TextInput {
-                id: providerSearch
-                enabled: root.selectedProviderSearchable()
+                border.color: providerSearch.activeFocus ? root.turquoise : root.tint(root.sand, 0.34)
+                TextInput {
+                  id: providerSearch
+                  enabled: root.selectedProviderSearchable()
                   anchors.fill: parent
                   anchors.leftMargin: Style.space(10)
                   anchors.rightMargin: Style.space(10)
@@ -486,8 +497,8 @@ Panel {
                       : root.hostWidget && root.hostWidget.selectedProviderKey === "radio"
                         ? "SEARCH STATIONS BY NAME, GENRE, OR COUNTRY…"
                         : "SEARCH TRACKS IN THE LOCAL CLIAMP LIBRARY…"
-                    color: root.mutedSand
-                    opacity: 0.55
+                    color: root.sand
+                    opacity: 0.82
                     font: providerSearch.font
                   }
                   Keys.onReturnPressed: if (root.hostWidget) root.hostWidget.searchProvider(text)
@@ -495,23 +506,25 @@ Panel {
               }
               Rectangle {
                 id: providerSearchButton
+                readonly property bool available: root.selectedProviderSearchable()
                 width: Style.space(84)
                 height: Style.space(36)
                 radius: Style.cornerRadius
-                color: root.tint(root.turquoise, 0.14)
+                color: available ? root.tint(root.turquoise, 0.18) : root.tint(root.night, 0.45)
                 border.width: 1
-                border.color: root.turquoise
+                border.color: available ? root.turquoise : root.tint(root.sand, 0.28)
                 Text {
                   anchors.centerIn: parent
                   text: root.hostWidget && root.hostWidget.providerBusy ? "WAIT…" : "SEARCH"
                   color: root.sand
+                  opacity: providerSearchButton.available ? 1 : 0.55
                   font.family: root.panelFont
                   font.pixelSize: Style.font.caption
                   font.bold: true
                 }
                 MouseArea {
                   anchors.fill: parent
-                  enabled: root.selectedProviderSearchable()
+                  enabled: providerSearchButton.available
                   cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
                   onClicked: if (root.hostWidget) root.hostWidget.searchProvider(providerSearch.text)
                 }
@@ -525,8 +538,8 @@ Panel {
                 : root.hostWidget && root.hostWidget.selectedProviderKey === "radio"
                   ? "Search finds stations inside CLIAMP's Radio provider."
                   : "Search matches CLIAMP's Local library—not a folder path. Use Files to browse your disk."
-              color: root.mutedSand
-              opacity: 0.65
+              color: root.sand
+              opacity: 0.88
               font.family: root.panelFont
               font.pixelSize: Style.font.caption
               wrapMode: Text.WordWrap
@@ -535,7 +548,7 @@ Panel {
             Text {
               visible: root.hostWidget && root.hostWidget.providerPlaylists.length > 0
               text: (root.hostWidget ? root.hostWidget.selectedProviderKey.toUpperCase() : "SELECTED")
-                + " PROVIDER PLAYLISTS"
+                + " PLAYLISTS"
               color: root.adobe
               font.family: root.panelFont
               font.pixelSize: Style.font.caption
@@ -549,20 +562,32 @@ Panel {
               Repeater {
                 model: root.hostWidget ? root.hostWidget.providerPlaylists : []
                 Rectangle {
+                  id: playlistChip
                   required property var modelData
+                  readonly property bool selected: root.hostWidget
+                    && root.hostWidget.loadedProviderPlaylistId === String(modelData.id)
                   width: Math.min(contentColumn.width, playlistName.implicitWidth + Style.space(22))
                   height: Style.space(31)
                   radius: height / 2
-                  color: playlistMouse.containsMouse ? root.tint(root.adobe, 0.16) : "transparent"
+                  color: selected ? root.tint(root.turquoise, 0.2)
+                    : playlistMouse.containsMouse ? root.tint(root.adobe, 0.22)
+                    : root.tint(root.night, 0.46)
                   border.width: 1
-                  border.color: root.tint(root.mutedSand, 0.24)
+                  border.color: selected ? root.turquoise
+                    : playlistMouse.containsMouse ? root.adobe : root.tint(root.sand, 0.3)
                   Text {
                     id: playlistName
                     anchors.centerIn: parent
+                    width: parent.width - Style.space(18)
                     text: String(modelData.name || modelData.id)
-                    color: root.mutedSand
+                    color: root.sand
+                    opacity: playlistChip.selected || playlistMouse.containsMouse ? 1 : 0.9
                     font.family: root.panelFont
                     font.pixelSize: Style.font.caption
+                    font.bold: playlistChip.selected
+                    horizontalAlignment: Text.AlignHCenter
+                    elide: Text.ElideRight
+                    maximumLineCount: 1
                   }
                   MouseArea {
                     id: playlistMouse
@@ -580,7 +605,8 @@ Panel {
                 && root.hostWidget.selectedProviderKey !== ""
                 && root.hostWidget.providerPlaylists.length === 0
               text: "No playlists are available from this provider."
-              color: root.mutedSand
+              color: root.sand
+              opacity: 0.88
               font.family: root.panelFont
               font.pixelSize: Style.font.bodySmall
             }
@@ -605,6 +631,9 @@ Panel {
                   height: Style.space(38)
                   radius: Style.cornerRadius
                   color: resultMouse.containsMouse ? root.tint(root.turquoise, 0.1) : "transparent"
+                  border.width: 1
+                  border.color: resultMouse.containsMouse
+                    ? root.tint(root.turquoise, 0.55) : root.tint(root.sand, 0.18)
                   Row {
                     anchors.fill: parent
                     anchors.leftMargin: Style.space(10)
@@ -622,7 +651,8 @@ Panel {
                       width: parent.width * 0.38
                       anchors.verticalCenter: parent.verticalCenter
                       text: modelData.artist || "PLAY"
-                      color: root.mutedSand
+                      color: root.sand
+                      opacity: 0.86
                       font.family: root.panelFont
                       font.pixelSize: Style.font.caption
                       horizontalAlignment: Text.AlignRight
@@ -644,7 +674,8 @@ Panel {
               visible: root.hostWidget && root.hostWidget.providerSearchAttempted
                 && !root.hostWidget.providerBusy && root.hostWidget.providerResults.length === 0
               text: "No matching tracks or stations."
-              color: root.mutedSand
+              color: root.sand
+              opacity: 0.88
               font.family: root.panelFont
               font.pixelSize: Style.font.bodySmall
             }
@@ -1071,7 +1102,7 @@ Panel {
                   text: modelData.toUpperCase()
                   color: selected ? root.sand : root.mutedSand
                   font.family: root.panelFont
-                  font.pixelSize: 9
+                  font.pixelSize: 10
                   horizontalAlignment: Text.AlignHCenter
                   elide: Text.ElideRight
                 }
@@ -1119,7 +1150,7 @@ Panel {
                   text: modelData.title
                   color: modelData.active ? root.sand : root.mutedSand
                   font.family: root.panelFont
-                  font.pixelSize: 9
+                  font.pixelSize: 10
                   horizontalAlignment: Text.AlignHCenter
                   elide: Text.ElideRight
                 }
@@ -1171,7 +1202,6 @@ Panel {
                   visible: queueInput.text === "" && !queueInput.activeFocus
                   text: "PASTE A TRACK PATH OR STREAM URL…"
                   color: root.mutedSand
-                  opacity: 0.55
                   font: queueInput.font
                 }
                 Keys.onReturnPressed: {
@@ -1254,7 +1284,7 @@ Panel {
                     anchors.horizontalCenter: parent.horizontalCenter
                     text: modelData.detail
                     color: selected ? root.adobe : root.mutedSand
-                    opacity: selected ? 1 : 0.65
+                    opacity: selected ? 1 : 0.9
                     font.family: root.panelFont
                     font.pixelSize: Style.font.caption
                   }
@@ -1284,7 +1314,7 @@ Panel {
             width: parent.width
             text: "SPACE PLAY   ·   ←/→ SEEK OR SKIP   ·   ↑/↓ VOLUME   ·   N/P TRACK   ·   S/R/M/V MODES"
             color: root.mutedSand
-            opacity: 0.62
+            opacity: 0.9
             font.family: root.panelFont
             font.pixelSize: Style.font.caption
             font.letterSpacing: 0.8
