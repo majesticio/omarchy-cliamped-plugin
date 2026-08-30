@@ -211,12 +211,13 @@ BarWidget {
     return true
   }
 
-  function enqueueVolume(delta) {
+  function enqueueVolume(target, delta) {
     if (!delta) return
     var pending = ipcQueue.slice()
+    // Socket volume is absolute; the public CLI fallback remains relative.
     pending.push({
       kind: "volumeAction",
-      request: { cmd: "volume", value: delta },
+      request: { cmd: "volume", value: target },
       fallback: ["volume", String(delta)]
     })
     ipcQueue = pending
@@ -441,6 +442,7 @@ BarWidget {
     if (!sessionReady) return
     var target = Math.max(-30, Math.min(6, volumeDb + Number(delta || 0)))
     if (target === volumeDb) return
+    volumeDirty = true
     pendingVolumeDelta += target - volumeDb
     volumeDb = target
     volumeCommit.restart()
@@ -867,7 +869,7 @@ BarWidget {
     onTriggered: {
       var delta = root.pendingVolumeDelta
       root.pendingVolumeDelta = 0
-      root.enqueueVolume(delta)
+      root.enqueueVolume(root.volumeDb, delta)
     }
   }
   Timer { id: queueRefresh; interval: 350; onTriggered: root.refreshQueue() }

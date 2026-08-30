@@ -30,6 +30,7 @@ Mutating operations used by CLIAMPed:
 
 ```json
 {"cmd":"play"}
+{"cmd":"volume","value":-4}
 {"cmd":"track.play","track":{"path":"https://example.invalid/stream"}}
 {"cmd":"track.queue","track":{"path":"/absolute/path/to/audio.flac"}}
 {"cmd":"queue.play","index":0}
@@ -38,6 +39,8 @@ Mutating operations used by CLIAMPed:
 {"cmd":"provider.load","provider":"radio","playlist":"<id>"}
 {"cmd":"provider.favorite","provider":"radio","playlist":"<id>"}
 ```
+
+The IPC `volume` value is an absolute dB target, unlike the relative delta accepted by `cliamp volume`. Keep absolute targets within `-30` to `+6` dB.
 
 Use IDs and track objects returned by the same provider/session. Do not invent playlist IDs. Treat `queue.clear`, collection loading, and track replacement as destructive to the active queue and run them only when the user requested the corresponding change.
 

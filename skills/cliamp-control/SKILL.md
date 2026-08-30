@@ -33,6 +33,8 @@ cliamp device <name|list>
 cliamp history --json --limit 20
 ```
 
+Before using `cliamp next` to satisfy a request to change tracks or stations, check the status fields. When shuffle is off, `index == total - 1`, and repeat is off, `next` stops playback instead of selecting another item. Inspect the queue and play a different index explicitly, or ask which item to play. Preserve shuffle and repeat settings unless the user requested a change to them; do not alter unrelated settings as a fallback.
+
 For an absolute volume request, read the current dB value and send only the required relative delta. Keep volume within CLIAMP's `-30` to `+6` dB range.
 
 Use `cliamp playlist ...` for local collection creation and maintenance. Preserve the user's terminology: CLIAMPed calls these collections in its interface even though the CLI command remains `playlist`.
