@@ -1,8 +1,7 @@
 import tempfile
 from pathlib import Path
-import subprocess
 import unittest
-from unittest.mock import call, patch
+from unittest.mock import patch
 
 import cliamp_file_picker
 
@@ -45,43 +44,53 @@ class ExpandSelectionsTests(unittest.TestCase):
             )
 
     @patch("cliamp_file_picker.expand_selections", return_value=["/music/track.mp3"])
-    @patch("cliamp_file_picker.subprocess.run")
-    def test_folder_picker_launches_in_directory_mode(self, run, expand_selections):
-        run.return_value = subprocess.CompletedProcess([], 0, stdout="/music/Album\n", stderr="")
+    @patch("cliamp_file_picker._run_zenity", return_value=(0, b"/music/Album\n", b""))
+    def test_folder_picker_launches_in_directory_mode(self, run_zenity, expand_selections):
 
         paths, cancelled = cliamp_file_picker.choose_paths(True, [])
 
         self.assertFalse(cancelled)
         self.assertEqual(paths, ["/music/track.mp3"])
-        command = run.call_args.args[0]
+        command = run_zenity.call_args.args[0]
         self.assertIn("--directory", command)
         self.assertIn("--multiple", command)
         expand_selections.assert_called_once_with(["/music/Album"])
 
 
 class LoadPathsTests(unittest.TestCase):
-    @patch("cliamp_file_picker.send_request")
-    def test_plays_first_track_then_queues_the_rest(self, send_request):
-        send_request.side_effect = [
-            {"ok": True},
-            {"ok": True},
+    @patch("cliamp_file_picker.send_requests")
+    def test_plays_first_track_then_queues_the_rest(self, send_requests):
+        send_requests.return_value = [
             {"ok": True, "tracks": [{"title": "1"}, {"title": "2"}]},
         ]
 
-        response = cliamp_file_picker.load_paths(["/music/1.mp3", "/music/2.mp3"])
+        with tempfile.TemporaryDirectory() as temporary:
+            first = Path(temporary) / "1.mp3"
+            second = Path(temporary) / "2.mp3"
+            first.touch()
+            second.touch()
+            response = cliamp_file_picker.load_paths([str(first), str(second)])
 
         self.assertTrue(response["ok"])
-        self.assertEqual(send_request.call_args_list, [
-            call({"cmd": "track.play", "track": {"title": "1", "path": "/music/1.mp3"}}),
-            call({"cmd": "track.queue", "track": {"title": "2", "path": "/music/2.mp3"}}),
-            call({"cmd": "queue.list"}),
+        self.assertEqual(send_requests.call_args.args[0], [
+            {"cmd": "track.play", "track": {"title": "1", "path": str(first)}},
+            {"cmd": "track.queue", "track": {"title": "2", "path": str(second)}},
+            {"cmd": "queue.list"},
         ])
+        self.assertEqual(send_requests.call_args.kwargs, {
+            "deadline_seconds": cliamp_file_picker.IPC_BATCH_DEADLINE_SECONDS,
+            "stop_on_error": True,
+            "retain_responses": False,
+        })
 
-    @patch("cliamp_file_picker.send_request")
-    def test_stops_after_cliamp_rejects_a_track(self, send_request):
-        send_request.return_value = {"ok": False, "error": "unsupported"}
-        with self.assertRaisesRegex(RuntimeError, "unsupported"):
-            cliamp_file_picker.load_paths(["/music/bad.mp3"])
+    @patch("cliamp_file_picker.send_requests")
+    def test_stops_after_cliamp_rejects_a_track(self, send_requests):
+        send_requests.return_value = [{"ok": False, "error": "unsupported"}]
+        with tempfile.TemporaryDirectory() as temporary:
+            track = Path(temporary) / "bad.mp3"
+            track.touch()
+            with self.assertRaisesRegex(RuntimeError, "unsupported"):
+                cliamp_file_picker.load_paths([str(track)])
 
 
 if __name__ == "__main__":

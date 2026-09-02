@@ -7,7 +7,7 @@ CLIAMP listens on `${XDG_CONFIG_HOME:-$HOME/.config}/cliamp/cliamp.sock`. Reques
 From this repository, use the serialized client rather than writing ad hoc socket code:
 
 ```bash
-python3 ../../cliamp_ipc.py '{"cmd":"status"}'
+/usr/bin/python3 -I ../../cliamp_ipc.py '{"cmd":"status"}'
 ```
 
 Resolve `../../cliamp_ipc.py` relative to this skill directory. In an installed Omarchy plugin it remains inside the same plugin bundle.

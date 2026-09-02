@@ -317,7 +317,7 @@ Item {
     color: root.blend(root.sky, root.turquoise, 0.18, 0.82)
     border.width: 1
     border.color: root.blend(root.turquoise, root.sand, 0.25, 0.5)
-    Text {
+    SafeText {
       id: modeLabel
       anchors.centerIn: parent
       text: ["SPECTRUM", "CANYON", "PULSE"][root.mode]

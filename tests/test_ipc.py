@@ -1,24 +1,23 @@
-import os
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import cliamp_ipc
 
 
 class IPCClientTests(unittest.TestCase):
-    @patch("cliamp_ipc.socket.socket")
-    def test_sends_and_receives_one_newline_framed_json_message(self, socket_factory):
-        client = MagicMock()
-        client.recv.return_value = b'{"ok":true,"state":"playing"}\n'
-        socket_factory.return_value = client
+    @patch("cliamp_ipc.send_requests")
+    def test_single_request_api_delegates_to_the_authenticated_batch(self, send_requests):
+        send_requests.return_value = [{"ok": True, "state": "playing", "session_mode": "tui"}]
 
-        with patch.dict(os.environ, {"XDG_CONFIG_HOME": "/test-config"}):
-            response = cliamp_ipc.send_request({"cmd": "status"})
+        response = cliamp_ipc.send_request({"cmd": "status"})
 
-        client.connect.assert_called_once_with("/test-config/cliamp/cliamp.sock")
-        client.sendall.assert_called_once_with(b'{"cmd":"status"}\n')
-        client.close.assert_called_once_with()
-        self.assertEqual(response, {"ok": True, "state": "playing"})
+        send_requests.assert_called_once_with(
+            [{"cmd": "status"}],
+            deadline_seconds=None,
+            socket_path=None,
+            trusted_executable=cliamp_ipc.TRUSTED_CLIAMP_PATH,
+        )
+        self.assertEqual(response, {"ok": True, "state": "playing", "session_mode": "tui"})
 
 
 if __name__ == "__main__":

@@ -73,11 +73,40 @@ BarWidget {
   property real pendingVolumeDelta: 0
   property var pendingAfterStart: null
   property int startupAttempts: 0
+  property bool providerTimedOut: false
+  property bool searchFavoritesTimedOut: false
+  property bool destroying: false
+  property int daemonStartFailures: 0
+  property double daemonRetryNotBefore: 0
+  property double daemonStartedAt: 0
+
+  readonly property int maxIpcQueueItems: 24
+  readonly property int maxProviderItems: 32
+  readonly property int maxPlaylistItems: 128
+  readonly property int maxTrackItems: 128
+  readonly property int maxFavoriteItems: 128
+  readonly property int maxHistoryItems: 24
+  readonly property int maxLyricItems: 256
+  readonly property int maxDeviceItems: 32
+  readonly property int maxModelCharacters: 131072
+  readonly property int maxDaemonStartFailures: 3
+  readonly property var processEnvironment: ({
+    "PATH": "/usr/bin",
+    "HOME": Quickshell.env("HOME"),
+    "XDG_CONFIG_HOME": Quickshell.env("XDG_CONFIG_HOME"),
+    "XDG_RUNTIME_DIR": Quickshell.env("XDG_RUNTIME_DIR"),
+    "DBUS_SESSION_BUS_ADDRESS": Quickshell.env("DBUS_SESSION_BUS_ADDRESS"),
+    "WAYLAND_DISPLAY": Quickshell.env("WAYLAND_DISPLAY"),
+    "DISPLAY": Quickshell.env("DISPLAY"),
+    "LANG": Quickshell.env("LANG") || "C.UTF-8",
+    "PIPEWIRE_REMOTE": Quickshell.env("PIPEWIRE_REMOTE"),
+    "PULSE_SERVER": Quickshell.env("PULSE_SERVER")
+  })
 
   readonly property bool playing: state === "playing"
   readonly property var providerCollections: {
     var collections = []
-    for (var i = 0; i < providerPlaylists.length; ++i) {
+    for (var i = 0; i < providerPlaylists.length && collections.length < maxPlaylistItems; ++i) {
       var item = providerPlaylists[i]
       // CLIAMP's built-in radio entry is an M3U index. The panel exposes its
       // resolved channels separately so it is never presented as a dead card.
@@ -94,7 +123,7 @@ BarWidget {
   }
   readonly property var providerFavorites: {
     var favorites = []
-    for (var i = 0; i < providerPlaylists.length; ++i) {
+    for (var i = 0; i < providerPlaylists.length && favorites.length < maxFavoriteItems; ++i) {
       var item = providerPlaylists[i]
       if (String(item.id || "").indexOf("f:") === 0) favorites.push(item)
     }
@@ -102,18 +131,19 @@ BarWidget {
   }
   readonly property var favoriteItems: {
     var favorites = []
-    var nativeNames = ({})
-    for (var i = 0; i < providerFavorites.length; ++i) {
+    // Untrusted titles must not collide with inherited Object prototype keys.
+    var nativeNames = Object.create(null)
+    for (var i = 0; i < providerFavorites.length && favorites.length < maxFavoriteItems; ++i) {
       var item = providerFavorites[i]
-      var cleanName = String(item.name || item.id).replace(/^★\s*/, "")
+      var cleanName = cleanText(item.name || item.id, 256).replace(/^★\s*/, "")
       nativeNames[cleanName.toLowerCase()] = true
       favorites.push({ kind: "provider", id: item.id, name: cleanName })
     }
-    for (var j = 0; j < searchFavorites.length; ++j) {
+    for (var j = 0; j < searchFavorites.length && favorites.length < maxFavoriteItems; ++j) {
       var track = searchFavorites[j]
-      var title = String(track.title || track.path)
+      var title = cleanText(track.title || track.path, 256)
       if (nativeNames[title.toLowerCase()]) continue
-      favorites.push({ kind: "search", id: "search:" + String(track.path), name: title, track: track })
+      favorites.push({ kind: "search", id: "search:" + cleanText(track.path, 4096), name: title, track: track })
     }
     return favorites
   }
@@ -122,11 +152,213 @@ BarWidget {
   readonly property string selectedStation: stationNameFor(trackPath)
   readonly property var bands: bandStream.bands
   readonly property string barLabel: sessionReady
-    ? ((playing ? "󰝚" : "󰏤") + "  " + (selectedStation || trackTitle || "CLIAMP"))
+    ? ((playing ? "󰝚" : "󰏤") + "  " + plainLabel(selectedStation || trackTitle || "CLIAMP", 256))
     : "󰝚  CLIAMP"
 
+  function cleanText(value, limit) {
+    if (typeof value !== "string") return ""
+    var result = value
+    try { if (result.normalize) result = result.normalize("NFC") } catch (e) {}
+    result = result.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, " ")
+    return result.slice(0, Math.max(0, limit))
+  }
+
+  // Paths, provider IDs, and provider metadata are protocol tokens, not
+  // display strings. Preserve their code points exactly while rejecting
+  // controls, malformed UTF-16, and values over the Python byte boundary.
+  function opaqueText(value, maximumBytes) {
+    if (typeof value !== "string" || !value) return ""
+    if (/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/.test(value)) return ""
+    var encoded = ""
+    try { encoded = encodeURIComponent(value) } catch (e) { return "" }
+    var bytes = 0
+    for (var i = 0; i < encoded.length; ++i) {
+      if (encoded.charAt(i) === "%") i += 2
+      bytes += 1
+      if (bytes > maximumBytes) return ""
+    }
+    return value
+  }
+
+  // Some host-shell labels are outside this component and may use AutoText.
+  function plainLabel(value, limit) {
+    return cleanText(value, limit).replace(/&/g, "＆").replace(/</g, "‹").replace(/>/g, "›")
+  }
+
+  function cleanNumber(value, minimum, maximum, fallback) {
+    if (typeof value !== "number" || !isFinite(value)) return fallback
+    return Math.max(minimum, Math.min(maximum, value))
+  }
+
+  function cleanInteger(value, minimum, maximum, fallback) {
+    var number = cleanNumber(value, minimum, maximum, fallback)
+    return number < 0 ? Math.ceil(number) : Math.floor(number)
+  }
+
+  function normalizeTrack(item) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return null
+    var path = opaqueText(item.path, 4096)
+    if (!path) return null
+    // A null-prototype object preserves even special opaque keys such as
+    // "__proto__" without invoking Object.prototype setters.
+    var providerMeta = Object.create(null)
+    var metadataCost = 0
+    if (item.provider_meta && typeof item.provider_meta === "object" && !Array.isArray(item.provider_meta)) {
+      var metadataKeys = Object.keys(item.provider_meta)
+      for (var i = 0; i < Math.min(metadataKeys.length, 16); ++i) {
+        var metadataKey = opaqueText(metadataKeys[i], 128)
+        var metadataValue = opaqueText(item.provider_meta[metadataKeys[i]], 512)
+        if (!metadataKey || metadataCost + metadataKey.length + metadataValue.length > 8192) break
+        metadataCost += metadataKey.length + metadataValue.length
+        providerMeta[metadataKey] = metadataValue
+      }
+    }
+    return {
+      title: cleanText(item.title, 256),
+      artist: cleanText(item.artist, 256),
+      album: cleanText(item.album, 256),
+      genre: cleanText(item.genre, 128),
+      path: path,
+      album_art_url: opaqueText(item.album_art_url, 4096),
+      stream_title: cleanText(item.stream_title, 256),
+      station: cleanText(item.station, 256),
+      year: cleanInteger(item.year, 0, 9999, 0),
+      track_number: cleanInteger(item.track_number, 0, 9999, 0),
+      duration_secs: cleanInteger(item.duration_secs, 0, 31536000, 0),
+      index: cleanInteger(item.index, -1, 1000000, -1),
+      queue_position: cleanInteger(item.queue_position, 0, 1000000, 0),
+      stream: item.stream === true,
+      realtime: item.realtime === true,
+      feed: item.feed === true,
+      bookmark: item.bookmark === true,
+      unplayable: item.unplayable === true,
+      dir_sourced: item.dir_sourced === true,
+      provider_meta: providerMeta
+    }
+  }
+
+  function normalizeTracks(value, limit) {
+    if (!Array.isArray(value)) return []
+    var result = []
+    var used = 0
+    var count = Math.min(value.length, limit)
+    for (var i = 0; i < count; ++i) {
+      var track = normalizeTrack(value[i])
+      if (!track) continue
+      var cost = trackCharacterCost(track)
+      if (used + cost > maxModelCharacters) break
+      used += cost
+      result.push(track)
+    }
+    return result
+  }
+
+  function trackCharacterCost(track) {
+    return track.title.length + track.artist.length + track.album.length + track.genre.length
+      + track.path.length + track.album_art_url.length + track.stream_title.length + track.station.length
+      + JSON.stringify(track.provider_meta).length
+  }
+
+  function normalizeProviders(value) {
+    if (!Array.isArray(value)) return []
+    var result = []
+    var used = 0
+    for (var i = 0; i < Math.min(value.length, maxProviderItems); ++i) {
+      var item = value[i]
+      if (!item || typeof item !== "object" || Array.isArray(item)) continue
+      var key = opaqueText(item.key, 128)
+      if (!key || !/^[A-Za-z0-9_.:-]+$/.test(key)) continue
+      var name = cleanText(item.name, 128) || key
+      if (used + key.length + name.length > maxModelCharacters) break
+      used += key.length + name.length
+      result.push({
+        key: key,
+        name: name,
+        searchable: item.searchable === true,
+        browse_artists: item.browse_artists === true,
+        browse_albums: item.browse_albums === true,
+        catalog: item.catalog === true
+      })
+    }
+    return result
+  }
+
+  function normalizePlaylists(value) {
+    if (!Array.isArray(value)) return []
+    var result = []
+    var used = 0
+    for (var i = 0; i < Math.min(value.length, maxPlaylistItems); ++i) {
+      var item = value[i]
+      if (!item || typeof item !== "object" || Array.isArray(item)) continue
+      var id = opaqueText(item.id, 512)
+      if (!id) continue
+      var name = cleanText(item.name, 256) || id
+      var provider = opaqueText(item.provider, 128)
+      var section = cleanText(item.section, 128)
+      var cost = id.length + name.length + provider.length + section.length
+      if (used + cost > maxModelCharacters) break
+      used += cost
+      result.push({
+        id: id,
+        name: name,
+        provider: provider,
+        section: section,
+        track_count: cleanInteger(item.track_count, 0, 1000000, 0),
+        duration_secs: cleanInteger(item.duration_secs, 0, 315360000, 0),
+        favoritable: item.favoritable === true,
+        favorite: item.favorite === true
+      })
+    }
+    return result
+  }
+
+  function normalizeHistory(value) {
+    if (!Array.isArray(value)) return []
+    var result = []
+    var used = 0
+    for (var i = 0; i < Math.min(value.length, maxHistoryItems); ++i) {
+      var item = value[i]
+      if (!item || typeof item !== "object" || Array.isArray(item)) continue
+      var track = normalizeTrack(item.track)
+      if (!track) continue
+      var playedAt = cleanText(item.played_at, 64)
+      var cost = trackCharacterCost(track) + playedAt.length
+      if (used + cost > maxModelCharacters) break
+      used += cost
+      result.push({ track: track, played_at: playedAt })
+    }
+    return result
+  }
+
+  function normalizeLyrics(value) {
+    if (!Array.isArray(value)) return []
+    var result = []
+    var used = 0
+    for (var i = 0; i < Math.min(value.length, maxLyricItems); ++i) {
+      var item = value[i]
+      if (!item || typeof item !== "object" || Array.isArray(item)) continue
+      var lyric = cleanText(item.text, 1024)
+      if (!lyric || used + lyric.length > 65536) break
+      used += lyric.length
+      result.push({ start: cleanNumber(item.start, 0, 31536000, 0), text: lyric })
+    }
+    return result
+  }
+
+  function normalizeDevices(value) {
+    if (!Array.isArray(value)) return []
+    var result = []
+    for (var i = 0; i < Math.min(value.length, maxDeviceItems); ++i) {
+      var item = value[i]
+      if (!item || typeof item !== "object" || Array.isArray(item)) continue
+      var name = opaqueText(item.name, 512)
+      if (name) result.push({ name: name, active: item.active === true })
+    }
+    return result
+  }
+
   function stationNameFor(path) {
-    var clean = String(path || "").replace(/^https?:/i, "").replace(/\/$/, "")
+    var clean = cleanText(path, 4096).replace(/^https?:/i, "").replace(/\/$/, "")
     for (var i = 0; i < stations.length; ++i) {
       if (String(stations[i].url).replace(/^https?:/i, "").replace(/\/$/, "") === clean)
         return stations[i].name
@@ -149,8 +381,12 @@ BarWidget {
     return String(Qt.resolvedUrl("cliamped_search_favorites.py")).replace(/^file:\/\//, "")
   }
 
+  function processHelperPath() {
+    return String(Qt.resolvedUrl("cliamped_process.py")).replace(/^file:\/\//, "")
+  }
+
   function isSearchFavorite(track) {
-    var path = String(track && track.path || "")
+    var path = opaqueText(track && track.path, 4096)
     for (var i = 0; i < searchFavorites.length; ++i)
       if (String(searchFavorites[i].path || "") === path) return true
     return false
@@ -159,14 +395,22 @@ BarWidget {
   function refreshSearchFavorites() {
     if (searchFavoriteProcess.running) return
     searchFavoritesBusy = true
-    searchFavoriteProcess.command = ["python3", searchFavoritesHelperPath(), "list"]
+    searchFavoritesTimedOut = false
+    searchFavoriteProcess.command = ["/usr/bin/python3", "-I", searchFavoritesHelperPath(), "list"]
+    searchFavoriteProcess.launchPending = true
+    searchFavoriteWatchdog.restart()
     searchFavoriteProcess.running = true
   }
 
   function toggleSearchFavorite(track) {
-    if (!track || !track.path || searchFavoriteProcess.running) return
+    var safeTrack = normalizeTrack(track)
+    if (!safeTrack || searchFavoriteProcess.running) return
     searchFavoritesBusy = true
-    searchFavoriteProcess.command = ["python3", searchFavoritesHelperPath(), "toggle", JSON.stringify(track)]
+    searchFavoritesTimedOut = false
+    searchFavoriteProcess.command = ["/usr/bin/python3", "-I", searchFavoritesHelperPath(),
+      "toggle", JSON.stringify(safeTrack)]
+    searchFavoriteProcess.launchPending = true
+    searchFavoriteWatchdog.restart()
     searchFavoriteProcess.running = true
   }
 
@@ -202,9 +446,29 @@ BarWidget {
   }
 
   function enqueueIpc(kind, request, fallbackArgs) {
+    if (destroying) return false
     if (!sessionReady && kind !== "status") return false
+    if (!request || typeof request !== "object" || Array.isArray(request)) return false
+    var encoded = ""
+    try { encoded = JSON.stringify(request) } catch (e) { return false }
+    if (!encoded || encoded.length > 32768) {
+      errorText = "The CLIAMP request exceeded the plugin limit."
+      return false
+    }
     var pending = ipcQueue.slice()
-    pending.push({ kind: kind, request: request, fallback: fallbackArgs || [] })
+    // Polls and slider updates are snapshots. Keep only their newest pending
+    // value so an unavailable peer cannot grow the resident work queue.
+    if (["status", "queueList", "history", "lyrics", "devices", "volumeAction", "search"].indexOf(kind) >= 0) {
+      var compacted = []
+      for (var i = 0; i < pending.length; ++i)
+        if (pending[i].kind !== kind) compacted.push(pending[i])
+      pending = compacted
+    }
+    if (pending.length >= maxIpcQueueItems) {
+      errorText = "CLIAMP is busy; wait for the pending request to finish."
+      return false
+    }
+    pending.push({ kind: cleanText(kind, 32), request: request })
     ipcQueue = pending
     syncProviderBusy()
     pumpIpc()
@@ -213,16 +477,7 @@ BarWidget {
 
   function enqueueVolume(target, delta) {
     if (!delta) return
-    var pending = ipcQueue.slice()
-    // Socket volume is absolute; the public CLI fallback remains relative.
-    pending.push({
-      kind: "volumeAction",
-      request: { cmd: "volume", value: target },
-      fallback: ["volume", String(delta)]
-    })
-    ipcQueue = pending
-    volumeDirty = true
-    pumpIpc()
+    if (enqueueIpc("volumeAction", { cmd: "volume", value: target }, [])) volumeDirty = true
   }
 
   function volumeRequestPending() {
@@ -232,15 +487,30 @@ BarWidget {
     return false
   }
 
+  function settleVolumeRequest(kind) {
+    if (kind !== "volumeAction") return
+    volumeDirty = false
+    for (var i = 0; i < ipcQueue.length; ++i) {
+      if (ipcQueue[i].kind === "volumeAction") {
+        volumeDirty = true
+        break
+      }
+    }
+  }
+
   function pumpIpc() {
-    if (ipcBusy || providerProcess.running || !ipcQueue.length) return
+    if (destroying || ipcBusy || providerProcess.running || !ipcQueue.length) return
     var pending = ipcQueue.slice()
     ipcCurrent = pending.shift()
     ipcQueue = pending
     ipcBusy = true
+    providerTimedOut = false
     providerRequestKind = ipcCurrent.kind
     syncProviderBusy()
-    providerProcess.command = ["python3", ipcHelperPath(), JSON.stringify(ipcCurrent.request)]
+    providerProcess.command = ["/usr/bin/python3", "-I", ipcHelperPath(), JSON.stringify(ipcCurrent.request)]
+    providerWatchdog.interval = isProviderKind(ipcCurrent.kind) || ipcCurrent.kind === "play" ? 72000 : 13500
+    providerProcess.launchPending = true
+    providerWatchdog.restart()
     providerProcess.running = true
   }
 
@@ -249,6 +519,34 @@ BarWidget {
     ipcCurrent = null
     syncProviderBusy()
     Qt.callLater(pumpIpc)
+  }
+
+  function handleIpcStartFailure() {
+    providerWatchdog.stop()
+    providerKill.stop()
+    providerTimedOut = false
+    var current = ipcCurrent
+    var kind = current ? current.kind : providerRequestKind
+    settleVolumeRequest(kind)
+    if (kind === "status") {
+      probeInFlight = false
+      sessionReady = false
+      modeKnown = false
+      if (!daemon.running && !startingDaemon && !destroying) startOwnedDaemon(false)
+    } else if (isProviderKind(kind)) {
+      providerError = "Could not start the bounded CLIAMP helper."
+    } else {
+      errorText = "Could not start the bounded CLIAMP helper."
+    }
+    finishIpc()
+  }
+
+  function handleFavoriteStartFailure() {
+    searchFavoriteWatchdog.stop()
+    searchFavoriteKill.stop()
+    searchFavoritesBusy = false
+    searchFavoritesTimedOut = false
+    if (!destroying) providerError = "Could not start the favorites helper."
   }
 
   function runProviderRequest(kind, request) {
@@ -261,7 +559,9 @@ BarWidget {
   }
 
   function selectProvider(key) {
-    selectedProviderKey = String(key || "")
+    var safeKey = opaqueText(key, 128)
+    if (safeKey && !/^[A-Za-z0-9_.:-]+$/.test(safeKey)) return
+    selectedProviderKey = safeKey
     loadedProviderPlaylistId = ""
     providerPlaylists = []
     providerResults = []
@@ -274,7 +574,7 @@ BarWidget {
   }
 
   function searchProvider(query) {
-    var value = String(query || "").trim()
+    var value = cleanText(query, 256).trim()
     if (!value || !selectedProviderKey) return
     providerResults = []
     providerSearchAttempted = true
@@ -293,8 +593,10 @@ BarWidget {
 
   function toggleProviderFavorite(playlistId) {
     if (selectedProviderKey !== "radio" || !playlistId) return
+    var safeId = opaqueText(playlistId, 512)
+    if (!safeId) return
     runProviderRequest("favorite", {
-      cmd: "provider.favorite", provider: "radio", playlist: String(playlistId)
+      cmd: "provider.favorite", provider: "radio", playlist: safeId
     })
   }
 
@@ -306,29 +608,32 @@ BarWidget {
 
   function loadProviderPlaylist(playlistId) {
     if (!selectedProviderKey || !playlistId) return
+    var safeId = opaqueText(playlistId, 512)
+    if (!safeId) return
     runProviderRequest("load", {
-      cmd: "provider.load", provider: selectedProviderKey, playlist: String(playlistId)
+      cmd: "provider.load", provider: selectedProviderKey, playlist: safeId
     })
   }
 
   function playProviderTrack(track) {
-    if (!track || !track.path) return
+    var safeTrack = normalizeTrack(track)
+    if (!safeTrack) return
     loadedProviderPlaylistId = ""
-    enqueueIpc("play", { cmd: "track.play", track: track }, [])
+    enqueueIpc("play", { cmd: "track.play", track: safeTrack }, [])
   }
 
   function playLocalFile(filePath) {
-    var path = String(filePath || "")
+    var path = opaqueText(filePath, 4096)
     if (!path) return
     loadedProviderPlaylistId = ""
     enqueueIpc("play", { cmd: "track.play", track: { path: path } }, [])
   }
 
   function playLocalFiles(paths) {
-    if (!paths || !paths.length) return
+    if (!Array.isArray(paths) || !paths.length || paths.length > maxTrackItems) return
     loadedProviderPlaylistId = ""
-    for (var i = 0; i < paths.length; ++i) {
-      var path = String(paths[i] || "")
+    for (var i = 0; i < Math.min(paths.length, maxTrackItems); ++i) {
+      var path = opaqueText(paths[i], 4096)
       if (!path) continue
       enqueueIpc(i === 0 ? "play" : "queueMutation", {
         cmd: i === 0 ? "track.play" : "track.queue", track: { path: path }
@@ -343,15 +648,17 @@ BarWidget {
   function clearQueue() { enqueueIpc("queueMutation", { cmd: "queue.clear" }, []) }
   function refreshHistory() { enqueueIpc("history", { cmd: "history", limit: 24 }, []) }
   function playHistoryItem(item) {
-    if (item && item.track) {
+    var track = item && normalizeTrack(item.track)
+    if (track) {
       loadedProviderPlaylistId = ""
-      enqueueIpc("play", { cmd: "track.play", track: item.track }, [])
+      enqueueIpc("play", { cmd: "track.play", track: track }, [])
     }
   }
   function refreshLyrics() { enqueueIpc("lyrics", { cmd: "lyrics" }, []) }
   function refreshDevices() { enqueueIpc("devices", { cmd: "device", name: "list" }, ["device", "list"]) }
   function selectDevice(name) {
-    if (name) enqueueIpc("deviceSet", { cmd: "device", name: String(name) }, ["device", String(name)])
+    var safeName = opaqueText(name, 512)
+    if (safeName) enqueueIpc("deviceSet", { cmd: "device", name: safeName }, [])
   }
 
   function injectPanel() {
@@ -364,38 +671,52 @@ BarWidget {
   }
 
   function probe() {
-    if (probeInFlight || statusProbe.running) return
-    probeInFlight = true
-    enqueueIpc("status", { cmd: "status" }, ["status", "--json"])
+    if (destroying || probeInFlight) return
+    probeInFlight = enqueueIpc("status", { cmd: "status" }, [])
   }
 
   function parseStatus(raw) {
     try {
-      var value = JSON.parse(String(raw || ""))
+      var value = typeof raw === "string" ? JSON.parse(raw) : raw
       if (!value || !value.ok) return false
       sessionReady = true
       startingDaemon = false
+      daemonStartupDeadline.stop()
       errorText = ""
-      if (!modeKnown && !modeProbe.running) modeProbe.running = true
-      state = String(value.state || "stopped").toLowerCase()
+      var statusMode = cleanText(value.session_mode, 16)
+      if (statusMode === "headless" || statusMode === "tui") {
+        sessionMode = statusMode
+        modeKnown = true
+      } else {
+        sessionMode = "unknown"
+        modeKnown = false
+      }
+      var nextState = cleanText(value.state, 16).toLowerCase()
+      state = ["playing", "paused", "stopped"].indexOf(nextState) >= 0 ? nextState : "stopped"
       if (value.volume !== undefined && !volumeDirty && !volumeRequestPending())
-        volumeDb = Number(value.volume)
+        volumeDb = cleanNumber(value.volume, -30, 6, 0)
       shuffle = value.shuffle === true
-      repeatMode = String(value.repeat || "Off")
+      repeatMode = cleanText(value.repeat, 16) || "Off"
       mono = value.mono === true
-      playbackSpeed = value.speed === undefined ? 1 : Number(value.speed)
-      eqPreset = String(value.eq_preset || "Flat")
-      currentIndex = value.index === undefined ? 0 : Number(value.index)
-      trackTotal = value.total === undefined ? 0 : Number(value.total)
-      positionSeconds = value.position === undefined ? 0 : Number(value.position)
-      durationSeconds = value.duration === undefined ? 0 : Number(value.duration)
-      if (value.track) {
-        var fallbackTitle = String(value.track.path || "").split("/").pop()
+      playbackSpeed = cleanNumber(value.speed, 0.25, 2, 1)
+      eqPreset = cleanText(value.eq_preset, 64) || "Flat"
+      currentIndex = cleanInteger(value.index, -1, 1000000, -1)
+      trackTotal = cleanInteger(value.total, 0, 1000000, 0)
+      positionSeconds = cleanNumber(value.position, 0, 31536000, 0)
+      durationSeconds = cleanNumber(value.duration, 0, 31536000, 0)
+      var statusTrack = normalizeTrack(value.track)
+      if (statusTrack) {
+        var fallbackTitle = statusTrack.path.split("/").pop()
         fallbackTitle = fallbackTitle.replace(/\.[^.]+$/, "")
-        trackTitle = String(value.track.title || fallbackTitle || "CLIAMPed")
-        trackArtist = String(value.track.artist || "")
-        trackAlbum = String(value.track.album || "")
-        trackPath = String(value.track.path || "")
+        trackTitle = cleanText(statusTrack.title || fallbackTitle || "CLIAMPed", 256)
+        trackArtist = statusTrack.artist
+        trackAlbum = statusTrack.album
+        trackPath = statusTrack.path
+      } else {
+        trackTitle = "CLIAMPed"
+        trackArtist = ""
+        trackAlbum = ""
+        trackPath = ""
       }
       return true
     } catch (e) {
@@ -403,16 +724,57 @@ BarWidget {
     }
   }
 
-  function startOwnedDaemon() {
-    if (daemon.running || startingDaemon) return
+  function handleDaemonExit(exitCode, failedToStart) {
+    daemonKill.stop()
+    daemonStartupDeadline.stop()
+    startupProbe.stop()
+    sessionReady = false
+    sessionMode = "unknown"
+    modeKnown = false
+    startingDaemon = false
+    if (!ownsDaemon) return
+    ownsDaemon = false
+    if (destroying) return
+    // Only a minute of stable ownership replenishes the automatic retry
+    // budget. Short-lived starts therefore stop after three attempts.
+    if (Date.now() - daemonStartedAt >= 60000) daemonStartFailures = 0
+    daemonStartFailures = Math.min(maxDaemonStartFailures, daemonStartFailures + 1)
+    daemonRetryNotBefore = Date.now() + Math.min(30000,
+      2000 * Math.pow(2, daemonStartFailures - 1))
+    errorText = failedToStart ? "Could not start the supervised CLIAMP daemon."
+      : exitCode === 0 ? "CLIAMP stopped." : "CLIAMP daemon exited unexpectedly."
+  }
+
+  function startOwnedDaemon(userInitiated) {
+    if (destroying || daemon.running || startingDaemon) return false
+    if (userInitiated === true) {
+      daemonStartFailures = 0
+      daemonRetryNotBefore = 0
+    } else if (daemonStartFailures >= maxDaemonStartFailures
+        || Date.now() < daemonRetryNotBefore) {
+      return false
+    }
     ownsDaemon = true
     sessionMode = "headless"
     modeKnown = true
     startingDaemon = true
+    daemonStartedAt = Date.now()
     startupAttempts = 0
     errorText = "Starting a private CLIAMP session…"
-    daemon.running = true
+    daemon.command = ["/usr/bin/python3", "-I", processHelperPath(), "daemon"]
+    daemon.launchPending = true
+    daemonStartupDeadline.restart()
     startupProbe.restart()
+    daemon.running = true
+    return true
+  }
+
+  function stopOwnedDaemon(message) {
+    if (!ownsDaemon || !daemon.running) return
+    startingDaemon = false
+    if (message) errorText = cleanText(message, 512)
+    daemon.signal(15)
+    daemonKill.restart()
   }
 
   function runAction(args) {
@@ -421,14 +783,14 @@ BarWidget {
     var request = { cmd: cmd }
     if (cmd === "volume" || cmd === "speed" || cmd === "seek") request.value = Number(args[1])
     else if (cmd === "shuffle" || cmd === "repeat" || cmd === "mono" || cmd === "vis" || cmd === "eq")
-      request.name = String(args[1] || "")
+      request.name = cleanText(args[1], 64)
     return enqueueIpc("action", request, args)
   }
 
   function togglePlayback() {
     if (!sessionReady) {
       pendingAfterStart = { kind: "action", request: { cmd: "play" }, fallback: ["play"] }
-      startOwnedDaemon()
+      startOwnedDaemon(true)
       delayedSelection.restart()
       return
     }
@@ -470,7 +832,7 @@ BarWidget {
       runAction(["seek", String(Math.max(0, Math.min(durationSeconds, seconds)) - positionSeconds)])
   }
   function queueMedia(value) {
-    var target = String(value || "").trim()
+    var target = opaqueText(value, 4096)
     if (!target) return
     if (!sessionReady) {
       queuedUrl = target
@@ -478,7 +840,7 @@ BarWidget {
         kind: "queueMutation", request: { cmd: "track.queue", track: { path: target } },
         fallback: ["queue", target]
       }
-      startOwnedDaemon()
+      startOwnedDaemon(true)
       delayedSelection.restart()
       return
     }
@@ -495,7 +857,7 @@ BarWidget {
       pendingAfterStart = { kind: "play", request: { cmd: "track.play", track: {
         title: station.name + " Stream", path: station.url, stream: true
       } }, fallback: [] }
-      startOwnedDaemon()
+      startOwnedDaemon(true)
       delayedSelection.restart()
       return
     }
@@ -556,7 +918,7 @@ BarWidget {
     id: panelLoader
     active: true
     // Keep this query aligned with manifest.json so Qt drops stale panel components on updates.
-    source: Qt.resolvedUrl("Panel.qml") + "?v=1.1.0"
+    source: Qt.resolvedUrl("Panel.qml") + "?v=1.2.0"
     visible: false
     onLoaded: {
       root.injectPanel()
@@ -575,7 +937,7 @@ BarWidget {
     labelVisible: false
     fixedWidth: barContent.implicitWidth + Style.space(18)
     tooltipText: root.sessionReady
-      ? ((root.playing ? "Playing " : "Paused ") + (root.trackTitle || "CLIAMP")
+      ? ((root.playing ? "Playing " : "Paused ") + root.plainLabel(root.trackTitle || "CLIAMP", 256)
         + " · left: panel · middle: play/pause · right: next")
       : "CLIAMPed is starting…"
 
@@ -583,7 +945,7 @@ BarWidget {
       id: barContent
       anchors.centerIn: parent
       spacing: Style.space(7)
-      Text {
+      SafeText {
         anchors.verticalCenter: parent.verticalCenter
         text: root.playing ? "󰝚" : "󰏤"
         color: root.playing ? root.bar.barForeground : Qt.darker(root.bar.barForeground, 1.4)
@@ -604,7 +966,7 @@ BarWidget {
         sky: root.bar ? root.bar.background : Color.background
         onCycleRequested: root.nextVisualizer()
       }
-      Text {
+      SafeText {
         anchors.verticalCenter: parent.verticalCenter
         text: root.selectedStation || root.trackTitle || "Radio"
         color: root.bar.barForeground
@@ -646,38 +1008,37 @@ BarWidget {
   }
 
   Process {
-    id: statusProbe
-    command: ["cliamp", "status", "--json"]
-    stdout: StdioCollector { id: statusOut; waitForEnd: true }
-    onExited: function(exitCode) {
-      root.probeInFlight = false
-      var ok = exitCode === 0 && root.parseStatus(statusOut.text)
-      if (!ok) {
-        root.sessionReady = false
-        root.modeKnown = false
-        if (!daemon.running && !root.startingDaemon) root.startOwnedDaemon()
+    id: providerProcess
+    property bool launchPending: false
+    command: ["/usr/bin/true"]
+    clearEnvironment: true
+    environment: root.processEnvironment
+    stdout: StdioCollector { id: providerOut; waitForEnd: true }
+    onStarted: launchPending = false
+    onRunningChanged: {
+      if (!running && launchPending) {
+        launchPending = false
+        root.handleIpcStartFailure()
       }
     }
-  }
-
-  Process {
-    id: providerProcess
-    command: ["true"]
-    stdout: StdioCollector { id: providerOut; waitForEnd: true }
-    stderr: StdioCollector { id: providerErr; waitForEnd: true }
     onExited: function(exitCode) {
+      launchPending = false
+      providerWatchdog.stop()
+      providerKill.stop()
       var current = root.ipcCurrent
       var kind = current ? current.kind : root.providerRequestKind
       var response = null
       try { response = JSON.parse(String(providerOut.text || "")) } catch (e) {}
-      if (exitCode !== 0 || !response || !response.ok) {
+      if (root.providerTimedOut || exitCode !== 0 || !response || !response.ok) {
         var message = response && response.error
-          ? String(response.error) : String(providerErr.text || "IPC request failed.").trim()
+          ? root.cleanText(response.error, 1024)
+          : root.providerTimedOut ? "CLIAMP request exceeded its deadline." : "CLIAMP IPC request failed."
+        root.settleVolumeRequest(kind)
         if (kind === "status") {
           root.probeInFlight = false
-          if (!statusProbe.running) statusProbe.running = true
-        } else if (current && current.fallback && current.fallback.length) {
-          root.runFallback(current.fallback)
+          root.sessionReady = false
+          root.modeKnown = false
+          if (!daemon.running && !root.startingDaemon && !root.destroying) root.startOwnedDaemon(false)
         } else if (kind === "providers" || kind === "playlists" || kind === "catalog"
             || kind === "favorite" || kind === "search" || kind === "load" || kind === "urlLoad") {
           root.providerError = message
@@ -689,10 +1050,10 @@ BarWidget {
       }
       if (kind === "status") {
         root.probeInFlight = false
-        root.parseStatus(JSON.stringify(response))
+        root.parseStatus(response)
       } else if (kind === "providers") {
         root.providerError = ""
-        root.providers = response.providers || []
+        root.providers = root.normalizeProviders(response.providers)
         if (root.providers.length) {
           var nextProvider = root.providers[0].key
           for (var providerIndex = 0; providerIndex < root.providers.length; ++providerIndex) {
@@ -707,7 +1068,7 @@ BarWidget {
         }
       } else if (kind === "playlists") {
         root.providerError = ""
-        root.providerPlaylists = response.playlists || []
+        root.providerPlaylists = root.normalizePlaylists(response.playlists)
         if (root.selectedProviderKey === "radio") {
           root.radioCatalogOffset = root.catalogSize(root.providerPlaylists)
           if (root.radioCatalogOffset === 0 && !root.radioCatalogRequested)
@@ -715,21 +1076,21 @@ BarWidget {
         }
       } else if (kind === "catalog") {
         root.providerError = ""
-        root.providerPlaylists = response.playlists || []
-        var added = Number(response.total || 0)
+        root.providerPlaylists = root.normalizePlaylists(response.playlists)
+        var added = root.cleanInteger(response.total, 0, root.maxPlaylistItems, 0)
         root.radioCatalogOffset = root.catalogSize(root.providerPlaylists)
-        root.radioCatalogHasMore = added > 0
+        root.radioCatalogHasMore = added > 0 && root.providerPlaylists.length < root.maxPlaylistItems
       } else if (kind === "favorite") {
         root.providerError = ""
         root.runProviderRequest("playlists", { cmd: "provider.playlists", provider: "radio" })
       } else if (kind === "search") {
         root.providerError = ""
-        root.providerResults = response.tracks || []
+        root.providerResults = root.normalizeTracks(response.tracks, 64)
       } else if (kind === "load") {
         root.providerError = ""
         root.loadedProviderPlaylistId = current && current.request
           ? String(current.request.playlist || "") : ""
-        var loadedTracks = response.tracks || []
+        var loadedTracks = root.normalizeTracks(response.tracks, root.maxTrackItems)
         var radioIndex = loadedTracks.length === 1
           && /\.m3u8?(?:$|\?)/i.test(String(loadedTracks[0].path || ""))
           && root.selectedProviderKey === "radio"
@@ -748,30 +1109,29 @@ BarWidget {
         actionRefresh.restart()
       } else if (kind === "urlLoad") {
         root.providerError = ""
-        root.queueTracks = response.tracks || []
+        root.queueTracks = root.normalizeTracks(response.tracks, root.maxTrackItems)
         root.currentIndex = root.queueTracks.length ? 0 : -1
         actionRefresh.restart()
       } else if (kind === "queueList" || kind === "queueMutation") {
-        root.queueTracks = response.tracks || []
-        if (response.index !== undefined) root.currentIndex = Number(response.index)
+        root.queueTracks = root.normalizeTracks(response.tracks, root.maxTrackItems)
+        if (response.index !== undefined)
+          root.currentIndex = root.cleanInteger(response.index, -1, 1000000, -1)
       } else if (kind === "play") {
-        if (response.tracks) root.queueTracks = response.tracks
-        if (response.index !== undefined) root.currentIndex = Number(response.index)
+        if (response.tracks) root.queueTracks = root.normalizeTracks(response.tracks, root.maxTrackItems)
+        if (response.index !== undefined)
+          root.currentIndex = root.cleanInteger(response.index, -1, 1000000, -1)
         actionRefresh.restart()
       } else if (kind === "history") {
-        root.historyItems = response.history || []
+        root.historyItems = root.normalizeHistory(response.history)
       } else if (kind === "lyrics") {
-        root.lyricLines = response.lyrics || []
+        root.lyricLines = root.normalizeLyrics(response.lyrics)
       } else if (kind === "devices") {
-        root.audioDevices = response.devices || []
+        root.audioDevices = root.normalizeDevices(response.devices)
       } else if (kind === "action" || kind === "deviceSet" || kind === "volumeAction") {
-        if (kind === "volumeAction") {
-          root.volumeDirty = false
-          for (var i = 0; i < root.ipcQueue.length; ++i)
-            if (root.ipcQueue[i].kind === "volumeAction") root.volumeDirty = true
-        }
+        root.settleVolumeRequest(kind)
         actionRefresh.restart()
       }
+      root.providerTimedOut = false
       if (kind === "load" || kind === "play" || kind === "queueMutation") queueRefresh.restart()
       root.finishIpc()
     }
@@ -779,66 +1139,56 @@ BarWidget {
 
   Process {
     id: daemon
-    command: ["cliamp", "--daemon", "--provider", "radio"]
+    property bool launchPending: false
+    command: ["/usr/bin/python3", "-I", root.processHelperPath(), "daemon"]
+    clearEnvironment: true
+    environment: root.processEnvironment
     running: false
-    onExited: function(exitCode) {
-      root.sessionReady = false
-      root.sessionMode = "unknown"
-      root.modeKnown = false
-      root.startingDaemon = false
-      if (root.ownsDaemon) {
-        root.ownsDaemon = false
-        root.errorText = exitCode === 0 ? "CLIAMP stopped." : "CLIAMP daemon exited unexpectedly."
+    onStarted: launchPending = false
+    onRunningChanged: {
+      if (!running && launchPending) {
+        launchPending = false
+        root.handleDaemonExit(-1, true)
       }
+    }
+    onExited: function(exitCode) {
+      launchPending = false
+      root.handleDaemonExit(exitCode, false)
     }
   }
 
   Process {
     id: searchFavoriteProcess
-    command: ["true"]
+    property bool launchPending: false
+    command: ["/usr/bin/true"]
+    clearEnvironment: true
+    environment: root.processEnvironment
     stdout: StdioCollector { id: searchFavoriteOut; waitForEnd: true }
-    stderr: StdioCollector { id: searchFavoriteErr; waitForEnd: true }
+    onStarted: launchPending = false
+    onRunningChanged: {
+      if (!running && launchPending) {
+        launchPending = false
+        root.handleFavoriteStartFailure()
+      }
+    }
     onExited: function(exitCode) {
+      launchPending = false
+      searchFavoriteWatchdog.stop()
+      searchFavoriteKill.stop()
       root.searchFavoritesBusy = false
       try {
         var response = JSON.parse(String(searchFavoriteOut.text || ""))
-        if (exitCode === 0 && response && response.ok) {
-          root.searchFavorites = response.favorites || []
+        if (!root.searchFavoritesTimedOut && exitCode === 0 && response && response.ok) {
+          root.searchFavorites = root.normalizeTracks(response.favorites, root.maxFavoriteItems)
           return
         }
-        root.providerError = String(response.error || searchFavoriteErr.text || "Could not update favorite.")
+        root.providerError = root.searchFavoritesTimedOut ? "Favorites request exceeded its deadline."
+          : root.cleanText(response && response.error, 1024) || "Could not update favorite."
       } catch (e) {
-        root.providerError = String(searchFavoriteErr.text || "Could not update favorite.")
+        root.providerError = root.searchFavoritesTimedOut
+          ? "Favorites request exceeded its deadline." : "Could not update favorite."
       }
-    }
-  }
-
-  Process {
-    id: modeProbe
-    command: ["bash", String(Qt.resolvedUrl("cliamp-session-mode.sh")).replace(/^file:\/\//, "")]
-    stdout: StdioCollector { id: modeOut; waitForEnd: true }
-    onExited: function(exitCode) {
-      var detected = String(modeOut.text || "").trim()
-      if (exitCode === 0 && (detected === "headless" || detected === "tui")) {
-        root.sessionMode = detected
-        root.modeKnown = true
-      }
-    }
-  }
-
-  function runFallback(args) {
-    if (fallbackAction.running || !args || !args.length) return false
-    fallbackAction.command = ["cliamp"].concat(args)
-    fallbackAction.running = true
-    return true
-  }
-
-  Process {
-    id: fallbackAction
-    command: ["cliamp", "status", "--json"]
-    onExited: function(exitCode) {
-      if (exitCode !== 0) root.errorText = "CLIAMP did not accept that control."
-      actionRefresh.restart()
+      root.searchFavoritesTimedOut = false
     }
   }
 
@@ -858,7 +1208,7 @@ BarWidget {
       } else if (root.pendingAfterStart) {
         root.pendingAfterStart = null
         root.startingDaemon = false
-        root.errorText = "CLIAMP did not become ready. Start CLIAMP and try again."
+        root.stopOwnedDaemon("CLIAMP did not become ready. Start CLIAMP and try again.")
       }
     }
   }
@@ -874,6 +1224,55 @@ BarWidget {
   }
   Timer { id: queueRefresh; interval: 350; onTriggered: root.refreshQueue() }
   Timer {
+    id: providerWatchdog
+    interval: 12000
+    repeat: false
+    onTriggered: {
+      if (!providerProcess.running) return
+      root.providerTimedOut = true
+      providerProcess.signal(15)
+      providerKill.restart()
+    }
+  }
+  Timer {
+    id: providerKill
+    interval: 1500
+    repeat: false
+    onTriggered: if (providerProcess.running) providerProcess.signal(9)
+  }
+  Timer {
+    id: searchFavoriteWatchdog
+    interval: 6000
+    repeat: false
+    onTriggered: {
+      if (!searchFavoriteProcess.running) return
+      root.searchFavoritesTimedOut = true
+      searchFavoriteProcess.signal(15)
+      searchFavoriteKill.restart()
+    }
+  }
+  Timer {
+    id: searchFavoriteKill
+    interval: 1500
+    repeat: false
+    onTriggered: if (searchFavoriteProcess.running) searchFavoriteProcess.signal(9)
+  }
+  Timer {
+    id: daemonStartupDeadline
+    interval: 12000
+    repeat: false
+    onTriggered: {
+      if (root.startingDaemon && !root.sessionReady)
+        root.stopOwnedDaemon("CLIAMP did not become ready before the startup deadline.")
+    }
+  }
+  Timer {
+    id: daemonKill
+    interval: 2500
+    repeat: false
+    onTriggered: if (root.ownsDaemon && daemon.running) daemon.signal(9)
+  }
+  Timer {
     interval: 2200
     running: true
     repeat: true
@@ -887,4 +1286,23 @@ BarWidget {
     onTriggered: root.positionSeconds = Math.min(root.durationSeconds, root.positionSeconds + interval / 1000)
   }
   Component.onCompleted: refreshSearchFavorites()
+  Component.onDestruction: {
+    root.destroying = true
+    root.ipcQueue = []
+    root.ipcCurrent = null
+    root.pendingAfterStart = null
+    root.providers = []
+    root.providerPlaylists = []
+    root.providerResults = []
+    root.searchFavorites = []
+    root.queueTracks = []
+    root.historyItems = []
+    root.lyricLines = []
+    root.audioDevices = []
+    // Destruction also destroys watchdog timers, so use a terminal signal.
+    // The daemon supervisor's guardian tears down CLIAMP's process group.
+    if (providerProcess.running) providerProcess.signal(9)
+    if (searchFavoriteProcess.running) searchFavoriteProcess.signal(9)
+    if (root.ownsDaemon && daemon.running) daemon.signal(9)
+  }
 }

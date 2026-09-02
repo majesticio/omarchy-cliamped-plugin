@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.majesticio.cliamped",
   "name": "CLIAMPed",
-  "version": "1.1.1",
+  "version": "1.2.0",
   "author": "majesticio",
   "license": "MIT",
   "description": "A theme-aware CLIAMP control center with radio discovery, favorites, queue, local media, and reactive visualizers",

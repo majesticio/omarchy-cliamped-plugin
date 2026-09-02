@@ -18,7 +18,7 @@ Its visualizer and controls take their colors from the current Omarchy theme rat
 - Automatic attachment to an existing CLIAMP TUI or daemon
 - A self-started background daemon when CLIAMP is not already running
 
-CLIAMPed uses CLIAMP's newline-framed Unix-socket IPC and serializes requests so concurrent panel actions cannot corrupt responses. File and folder selection runs in a separate Zenity process, keeping native picker failures outside Quickshell.
+CLIAMPed uses authenticated, size-limited, deadline-bound CLIAMP Unix-socket IPC and serializes requests so concurrent panel actions cannot corrupt responses. File and folder selection runs behind a bounded Zenity supervisor, keeping native picker failures outside Quickshell. The complete runtime trust model and limits are documented in [`SECURITY.md`](SECURITY.md).
 
 ## Theme gallery
 
@@ -48,6 +48,8 @@ The Files tab offers **Choose Files…** and **Add Folder…**. CLIAMPed closes 
 - recurse through subfolders;
 - sort paths in natural filename order (`2` before `10`);
 - ignore hidden files, AppleDouble `._` metadata, and unsupported formats;
+- stay on one filesystem, never follow symlinks, and enforce traversal/depth/time limits;
+- admit at most 20 audio files per selection;
 - play the first track and put every remaining track in CLIAMP's Queue.
 
 Supported extensions are MP3, FLAC, Ogg Vorbis, Opus, WAV, M4A, AAC, and WMA.
@@ -57,9 +59,9 @@ Supported extensions are MP3, FLAC, Ogg Vorbis, Opus, WAV, M4A, AAC, and WMA.
 Requirements:
 
 - Omarchy with shell plugin support
-- CLIAMP 1.63 or newer available as `cliamp`
-- Python 3
-- Zenity
+- CLIAMP 1.63 or newer installed at `/usr/bin/cliamp`
+- Python 3 installed at `/usr/bin/python3`
+- Zenity installed at `/usr/bin/zenity`
 
 Install and enable the plugin:
 
@@ -67,7 +69,7 @@ Install and enable the plugin:
 omarchy plugin add https://github.com/majesticio/omarchy-cliamped-plugin.git --enable
 ```
 
-If CLIAMP is already running, CLIAMPed attaches to it and does not stop it. Otherwise, it starts `cliamp --daemon --provider radio`; that process survives plugin and shell reloads, and the widget reattaches afterward.
+If CLIAMP is already running, CLIAMPed attaches to it and never stops it. Otherwise, it starts a supervised `/usr/bin/cliamp --daemon --provider radio` session owned by the plugin. Plugin-owned sessions are stopped during plugin or shell teardown so their audio/provider process tree cannot be orphaned.
 
 Remove it with:
 
@@ -96,10 +98,10 @@ Focused panel:
 Shell IPC:
 
 ```bash
-omarchy-shell io.github.majesticio.cliamped open
-omarchy-shell io.github.majesticio.cliamped tab browse
-omarchy-shell io.github.majesticio.cliamped visualizer Pulse
-omarchy-shell io.github.majesticio.cliamped close
+/usr/bin/omarchy-shell io.github.majesticio.cliamped open
+/usr/bin/omarchy-shell io.github.majesticio.cliamped tab browse
+/usr/bin/omarchy-shell io.github.majesticio.cliamped visualizer Pulse
+/usr/bin/omarchy-shell io.github.majesticio.cliamped close
 ```
 
 The `tab` endpoint accepts `favorites`, `browse`, `queue`, `files`, or `more`. The `visualizer` endpoint accepts `Spectrum`, `Canyon`, or `Pulse`.
@@ -121,10 +123,10 @@ Validate the package and run its helper tests:
 
 ```bash
 omarchy plugin validate .
-python3 -m unittest discover -s tests -v
+/usr/bin/python3 -m unittest discover -s tests -v
 ```
 
-The compatibility entry points `cliamp-ipc.py` and `cliamp-ipc.sh` are intentionally retained for panels cached from earlier development builds.
+The isolated Python compatibility entry point `cliamp-ipc.py` is retained for panels cached from earlier development builds.
 
 ## Relationship to CLIAMP
 

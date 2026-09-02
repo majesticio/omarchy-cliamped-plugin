@@ -16,6 +16,8 @@ Panel {
   property string filePickerStatus: ""
   property bool filePickerFailed: false
   property string pickerMode: "files"
+  property bool audioPickerTimedOut: false
+  property bool destroying: false
   readonly property var barIdentity: hostWidget || root
   readonly property color sand: bar ? bar.foreground : Color.popups.text
   // Omarchy's muted token is deliberately subtle and can be nearly invisible in
@@ -28,14 +30,24 @@ Panel {
   readonly property string panelFont: bar ? bar.fontFamily : Style.font.family
   readonly property string barLabel: hostWidget ? hostWidget.barLabel : "󰝚  CLIAMP"
   readonly property string tooltipLabel: hostWidget && hostWidget.sessionReady
-    ? hostWidget.trackTitle : "Starting CLIAMPed…"
+    ? hostWidget.plainLabel(hostWidget.trackTitle, 256) : "Starting CLIAMPed…"
+  readonly property var processEnvironment: ({
+    "PATH": "/usr/bin",
+    "HOME": Quickshell.env("HOME"),
+    "XDG_CONFIG_HOME": Quickshell.env("XDG_CONFIG_HOME"),
+    "XDG_RUNTIME_DIR": Quickshell.env("XDG_RUNTIME_DIR"),
+    "DBUS_SESSION_BUS_ADDRESS": Quickshell.env("DBUS_SESSION_BUS_ADDRESS"),
+    "WAYLAND_DISPLAY": Quickshell.env("WAYLAND_DISPLAY"),
+    "DISPLAY": Quickshell.env("DISPLAY"),
+    "LANG": Quickshell.env("LANG") || "C.UTF-8"
+  })
 
   function tint(colorValue, alpha) {
     return Qt.rgba(colorValue.r, colorValue.g, colorValue.b, alpha)
   }
   function launchAudioPicker(mode) {
     if (audioPicker.running || pickerLaunch.running) return
-    root.pickerMode = mode
+    root.pickerMode = mode === "folder" ? "folder" : "files"
     root.filePickerStatus = mode === "folder"
       ? "Choose a folder; its audio tracks will be queued in filename order…"
       : "Waiting for your selection…"
@@ -73,12 +85,42 @@ Panel {
 
   Process {
     id: audioPicker
+    property bool launchPending: false
     command: []
+    clearEnvironment: true
+    environment: root.processEnvironment
     stdout: StdioCollector { id: audioPickerOut; waitForEnd: true }
-    stderr: StdioCollector { id: audioPickerErr; waitForEnd: true }
+    onStarted: launchPending = false
+    onRunningChanged: {
+      if (!running && launchPending) {
+        launchPending = false
+        audioPickerWatchdog.stop()
+        audioPickerKill.stop()
+        root.audioPickerTimedOut = false
+        if (root.destroying) return
+        root.filePickerStatus = "Could not start the bounded file picker."
+        root.filePickerFailed = true
+        root.libraryTab = "files"
+        root.open()
+      }
+    }
     onExited: function(exitCode) {
+      launchPending = false
+      audioPickerWatchdog.stop()
+      audioPickerKill.stop()
+      if (root.destroying) return
       var response = null
       try { response = JSON.parse(String(audioPickerOut.text || "")) } catch (e) {}
+      if (root.audioPickerTimedOut) {
+        root.filePickerStatus = "File selection exceeded its deadline."
+        root.filePickerFailed = true
+        root.audioPickerTimedOut = false
+        if (!root.destroying) {
+          root.libraryTab = "files"
+          root.open()
+        }
+        return
+      }
       if (response && response.cancelled) {
         root.filePickerStatus = root.pickerMode === "folder" ? "No folder selected." : "No files selected."
         root.filePickerFailed = false
@@ -87,20 +129,24 @@ Panel {
         return
       }
       if (exitCode !== 0 || !response || !response.ok) {
-        root.filePickerStatus = response && response.error ? String(response.error)
-          : String(audioPickerErr.text || "File picker did not return a result.").trim()
+        root.filePickerStatus = response && response.error && root.hostWidget
+          ? root.hostWidget.cleanText(response.error, 1024) : "File picker did not return a result."
         root.filePickerFailed = true
         root.libraryTab = "files"
         root.open()
         return
       }
-      root.filePickerStatus = response.selected_count + (response.selected_count === 1
+      var selectedCount = root.hostWidget
+        ? root.hostWidget.cleanInteger(response.selected_count, 0, root.hostWidget.maxTrackItems, 0) : 0
+      root.filePickerStatus = selectedCount + (selectedCount === 1
         ? " track is playing and visible in Queue."
         : " tracks loaded: the first is playing and the rest are queued.")
       root.filePickerFailed = false
       if (root.hostWidget) {
-        root.hostWidget.queueTracks = response.tracks || []
-        if (response.index !== undefined) root.hostWidget.currentIndex = Number(response.index)
+        root.hostWidget.queueTracks = root.hostWidget.normalizeTracks(
+          response.tracks, root.hostWidget.maxTrackItems)
+        if (response.index !== undefined)
+          root.hostWidget.currentIndex = root.hostWidget.cleanInteger(response.index, -1, 1000000, -1)
         root.hostWidget.probe()
       }
       root.libraryTab = "queue"
@@ -113,12 +159,36 @@ Panel {
     interval: 180
     onTriggered: {
       audioPicker.command = [
-        "python3",
+        "/usr/bin/python3",
+        "-I",
         String(Qt.resolvedUrl("cliamp_file_picker.py")).replace(/^file:\/\//, ""),
         root.pickerMode === "folder" ? "--folder" : "--files"
       ]
+      root.audioPickerTimedOut = false
+      audioPicker.launchPending = true
+      audioPickerWatchdog.restart()
       audioPicker.running = true
     }
+  }
+
+  Timer {
+    id: audioPickerWatchdog
+    // 300 s chooser + 8 s traversal + 30 s aggregate IPC, with cleanup slack.
+    interval: 345000
+    repeat: false
+    onTriggered: {
+      if (!audioPicker.running) return
+      root.audioPickerTimedOut = true
+      audioPicker.signal(15)
+      audioPickerKill.restart()
+    }
+  }
+
+  Timer {
+    id: audioPickerKill
+    interval: 2500
+    repeat: false
+    onTriggered: if (audioPicker.running) audioPicker.signal(9)
   }
 
   KeyboardPanel {
@@ -193,7 +263,7 @@ Panel {
             Column {
               width: parent.width - sessionBadge.width
               spacing: Style.space(3)
-              Text {
+              SafeText {
                 text: "CLIAMPED"
                 color: root.turquoise
                 font.family: root.panelFont
@@ -201,7 +271,7 @@ Panel {
                 font.bold: true
                 font.letterSpacing: 2.4
               }
-              Text {
+              SafeText {
                 text: "YOUR MUSIC, FULLY CLIAMPED"
                 color: root.mutedSand
                 font.family: root.panelFont
@@ -217,7 +287,7 @@ Panel {
               color: root.tint(root.adobe, 0.16)
               border.width: 1
               border.color: root.tint(root.adobe, 0.55)
-              Text {
+              SafeText {
                 id: badgeText
                 anchors.centerIn: parent
                 text: root.hostWidget ? root.hostWidget.sessionLabel : "CONNECTING"
@@ -245,7 +315,7 @@ Panel {
                 Column {
                   width: parent.width - stateText.width
                   spacing: Style.space(2)
-                  Text {
+                  SafeText {
                     width: parent.width
                     text: root.hostWidget
                       ? (root.hostWidget.selectedStation || root.hostWidget.trackTitle || "CLIAMPed")
@@ -256,7 +326,7 @@ Panel {
                     font.bold: true
                     elide: Text.ElideRight
                   }
-                  Text {
+                  SafeText {
                     text: root.hostWidget && root.hostWidget.trackArtist
                       ? (root.hostWidget.trackArtist + (root.hostWidget.trackAlbum
                         ? "  ·  " + root.hostWidget.trackAlbum : "")).toUpperCase()
@@ -268,7 +338,7 @@ Panel {
                     font.letterSpacing: 1.2
                   }
                 }
-                Text {
+                SafeText {
                   id: stateText
                   text: root.hostWidget && root.hostWidget.playing ? "ON AIR" : "STANDBY"
                   color: root.hostWidget && root.hostWidget.playing ? root.turquoise : root.mutedSand
@@ -314,7 +384,7 @@ Panel {
                 color: selected ? root.tint(root.turquoise, 0.16) : "transparent"
                 border.width: 1
                 border.color: selected ? root.turquoise : root.tint(root.mutedSand, 0.22)
-                Text {
+                SafeText {
                   anchors.centerIn: parent
                   text: modelData.label
                   color: selected ? root.sand : root.mutedSand
@@ -395,14 +465,14 @@ Panel {
             }
             Row {
               width: parent.width
-              Text {
+              SafeText {
                 width: parent.width / 2
                 text: root.clock(root.hostWidget ? root.hostWidget.positionSeconds : 0)
                 color: root.mutedSand
                 font.family: root.panelFont
                 font.pixelSize: Style.font.caption
               }
-              Text {
+              SafeText {
                 width: parent.width / 2
                 text: root.clock(root.hostWidget ? root.hostWidget.durationSeconds : 0)
                 color: root.mutedSand
@@ -413,7 +483,7 @@ Panel {
             }
           }
 
-          Text {
+          SafeText {
             width: parent.width
             text: "PLAYBACK"
             color: root.turquoise
@@ -446,8 +516,8 @@ Panel {
                 Row {
                   anchors.centerIn: parent
                   spacing: Style.space(6)
-                  Text { text: modelData.icon; color: root.sand; font.family: root.panelFont; font.pixelSize: Style.font.body }
-                  Text { text: modelData.label; color: root.mutedSand; font.family: root.panelFont; font.pixelSize: Style.font.caption }
+                  SafeText { text: modelData.icon; color: root.sand; font.family: root.panelFont; font.pixelSize: Style.font.body }
+                  SafeText { text: modelData.label; color: root.mutedSand; font.family: root.panelFont; font.pixelSize: Style.font.caption }
                 }
                 MouseArea {
                   id: controlMouse
@@ -460,7 +530,7 @@ Panel {
             }
           }
 
-          Text {
+          SafeText {
             width: parent.width
             text: "PLAYBACK SPEED  ·  " + (root.hostWidget ? root.hostWidget.playbackSpeed : 1) + "×"
             color: root.turquoise
@@ -487,7 +557,7 @@ Panel {
                 color: selected ? root.tint(root.turquoise, 0.18) : "transparent"
                 border.width: 1
                 border.color: selected ? root.turquoise : root.tint(root.mutedSand, 0.22)
-                Text {
+                SafeText {
                   anchors.centerIn: parent
                   width: parent.width - Style.space(3)
                   text: modelData + "×"
@@ -506,7 +576,7 @@ Panel {
             }
           }
 
-          Text {
+          SafeText {
             width: parent.width
             text: "EQUALIZER  ·  " + (root.hostWidget ? root.hostWidget.eqPreset.toUpperCase() : "FLAT")
             color: root.adobe
@@ -538,7 +608,7 @@ Panel {
                 color: selected ? root.tint(root.adobe, 0.2) : "transparent"
                 border.width: 1
                 border.color: selected ? root.adobe : root.tint(root.mutedSand, 0.2)
-                Text {
+                SafeText {
                   anchors.centerIn: parent
                   width: parent.width - Style.space(4)
                   text: modelData.toUpperCase()
@@ -584,7 +654,7 @@ Panel {
                     height: volumeDeck.height
                     color: volumeMouse.containsMouse && modelData.action !== "none"
                       ? root.tint(root.turquoise, 0.15) : "transparent"
-                    Text {
+                    SafeText {
                       anchors.centerIn: parent
                       text: modelData.label
                       color: modelData.action === "none" ? root.sand : root.turquoise
@@ -604,7 +674,7 @@ Panel {
                   }
                 }
               }
-              Text {
+              SafeText {
                 anchors.horizontalCenter: parent.horizontalCenter
                 anchors.top: parent.top
                 anchors.topMargin: Style.space(3)
@@ -635,7 +705,7 @@ Panel {
                 Column {
                   anchors.centerIn: parent
                   spacing: Style.space(2)
-                  Text {
+                  SafeText {
                     anchors.horizontalCenter: parent.horizontalCenter
                     text: modelData.label
                     color: root.mutedSand
@@ -644,7 +714,7 @@ Panel {
                     font.bold: true
                     font.letterSpacing: 1.1
                   }
-                  Text {
+                  SafeText {
                     anchors.horizontalCenter: parent.horizontalCenter
                     text: modelData.value
                     color: modelData.active ? root.turquoise : root.sand
@@ -702,7 +772,7 @@ Panel {
             spacing: Style.space(10)
             visible: root.libraryTab === "favorites"
 
-            Text {
+            SafeText {
               text: "RADIO FAVORITES"
               color: root.turquoise
               font.family: root.panelFont
@@ -711,7 +781,7 @@ Panel {
               font.letterSpacing: 1.2
             }
 
-            Text {
+            SafeText {
               width: parent.width
               text: "Your starred Radio Browser stations. Manage stars here or while browsing the directory."
               color: root.sand
@@ -743,7 +813,7 @@ Panel {
                   border.width: 1
                   border.color: selected ? root.turquoise
                     : favoritePlayMouse.containsMouse ? root.adobe : root.tint(root.sand, 0.28)
-                  Text {
+                  SafeText {
                     anchors.left: parent.left
                     anchors.right: favoriteRemove.left
                     anchors.leftMargin: Style.space(12)
@@ -756,7 +826,7 @@ Panel {
                     font.bold: favoriteCard.selected
                     elide: Text.ElideRight
                   }
-                  Text {
+                  SafeText {
                     id: favoriteRemove
                     anchors.right: parent.right
                     anchors.rightMargin: Style.space(12)
@@ -801,7 +871,7 @@ Panel {
                 anchors.centerIn: parent
                 width: parent.width - Style.space(40)
                 spacing: Style.space(8)
-                Text {
+                SafeText {
                   anchors.horizontalCenter: parent.horizontalCenter
                   text: "NO FAVORITES YET"
                   color: root.adobe
@@ -809,7 +879,7 @@ Panel {
                   font.pixelSize: Style.font.body
                   font.bold: true
                 }
-                Text {
+                SafeText {
                   width: parent.width
                   text: "Open Browse and select ☆ beside a directory station. Click here to find stations."
                   color: root.sand
@@ -838,7 +908,7 @@ Panel {
               }
             }
 
-            Text {
+            SafeText {
               visible: root.hostWidget && root.hostWidget.providerBusy
               text: "LOADING FAVORITES…"
               color: root.turquoise
@@ -853,7 +923,7 @@ Panel {
             spacing: Style.space(10)
             visible: root.libraryTab === "providers"
 
-            Text {
+            SafeText {
               text: "SOURCES  ›  COLLECTIONS"
               color: root.turquoise
               font.family: root.panelFont
@@ -862,7 +932,7 @@ Panel {
               font.letterSpacing: 1.2
             }
 
-            Text {
+            SafeText {
               visible: root.hostWidget && root.hostWidget.providerBusy
               text: "LOADING " + (root.hostWidget && root.hostWidget.selectedProviderKey
                 ? root.hostWidget.selectedProviderKey.toUpperCase() : "PROVIDERS") + "…"
@@ -896,7 +966,7 @@ Panel {
                   border.width: 1
                   border.color: selected ? root.adobe
                     : providerMouse.containsMouse ? root.turquoise : root.tint(root.sand, 0.34)
-                  Text {
+                  SafeText {
                     id: providerName
                     anchors.centerIn: parent
                     text: String(modelData.name || modelData.key).toUpperCase()
@@ -916,7 +986,7 @@ Panel {
               }
             }
 
-            Text {
+            SafeText {
               visible: root.hostWidget && root.hostWidget.selectedProviderKey === "radio"
               text: "CLIAMP RADIO  ·  11 CHANNELS"
               color: root.adobe
@@ -947,7 +1017,7 @@ Panel {
                   border.width: 1
                   border.color: selected ? root.adobe
                     : radioChannelMouse.containsMouse ? root.turquoise : root.tint(root.sand, 0.28)
-                  Text {
+                  SafeText {
                     anchors.centerIn: parent
                     width: parent.width - Style.space(12)
                     text: String(modelData.name).toUpperCase()
@@ -973,7 +1043,7 @@ Panel {
               width: parent.width
               visible: root.hostWidget && root.hostWidget.selectedProviderKey === "radio"
               spacing: Style.space(8)
-              Text {
+              SafeText {
                 width: parent.width - radioCatalogButton.width - Style.space(8)
                 anchors.verticalCenter: parent.verticalCenter
                 text: root.hostWidget && root.hostWidget.radioCatalogOffset > 0
@@ -995,7 +1065,7 @@ Panel {
                   : root.tint(root.night, 0.5)
                 border.width: 1
                 border.color: root.turquoise
-                Text {
+                SafeText {
                   anchors.centerIn: parent
                   text: root.hostWidget && root.hostWidget.providerBusy ? "LOADING…"
                     : root.hostWidget && root.hostWidget.radioCatalogOffset > 0 ? "LOAD MORE" : "LOAD DIRECTORY"
@@ -1016,7 +1086,7 @@ Panel {
               }
             }
 
-            Text {
+            SafeText {
               visible: root.hostWidget && root.hostWidget.providerCollections.length > 0
               text: root.hostWidget && root.hostWidget.selectedProviderKey === "local"
                 ? "LOCAL COLLECTIONS" : "DIRECTORY STATIONS"
@@ -1054,7 +1124,7 @@ Panel {
                   border.width: 1
                   border.color: selected ? root.turquoise
                     : collectionMouse.containsMouse ? root.adobe : root.tint(root.sand, 0.3)
-                  Text {
+                  SafeText {
                     anchors.left: parent.left
                     anchors.right: collectionStar.visible ? collectionStar.left : parent.right
                     anchors.leftMargin: Style.space(12)
@@ -1069,7 +1139,7 @@ Panel {
                     elide: Text.ElideRight
                     maximumLineCount: 1
                   }
-                  Text {
+                  SafeText {
                     id: collectionStar
                     visible: collectionCard.favoritable
                     anchors.right: parent.right
@@ -1101,7 +1171,7 @@ Panel {
               }
             }
 
-            Text {
+            SafeText {
               visible: root.hostWidget && !root.hostWidget.providerBusy
                 && root.hostWidget.selectedProviderKey !== ""
                 && root.hostWidget.selectedProviderKey !== "radio"
@@ -1125,6 +1195,7 @@ Panel {
                 border.color: providerSearch.activeFocus ? root.turquoise : root.tint(root.sand, 0.34)
                 TextInput {
                   id: providerSearch
+                  maximumLength: 256
                   enabled: root.selectedProviderSearchable()
                   anchors.fill: parent
                   anchors.leftMargin: Style.space(10)
@@ -1134,7 +1205,7 @@ Panel {
                   font.family: root.panelFont
                   font.pixelSize: Style.font.bodySmall
                   clip: true
-                  Text {
+                  SafeText {
                     anchors.verticalCenter: parent.verticalCenter
                     visible: providerSearch.text === "" && !providerSearch.activeFocus
                     text: !root.selectedProviderSearchable()
@@ -1164,7 +1235,7 @@ Panel {
                 color: available ? root.tint(root.turquoise, 0.18) : root.tint(root.night, 0.45)
                 border.width: 1
                 border.color: available ? root.turquoise : root.tint(root.sand, 0.28)
-                Text {
+                SafeText {
                   anchors.centerIn: parent
                   text: root.hostWidget && root.hostWidget.providerBusy ? "WAIT…" : "SEARCH"
                   color: root.sand
@@ -1185,7 +1256,7 @@ Panel {
               }
             }
 
-            Text {
+            SafeText {
               width: parent.width
               text: !root.selectedProviderSearchable()
                 ? "This CLIAMP source exposes collections but no search endpoint."
@@ -1203,7 +1274,7 @@ Panel {
               width: parent.width
               spacing: Style.space(5)
               visible: root.hostWidget && root.hostWidget.providerResults.length > 0
-              Text {
+              SafeText {
               text: "SEARCH RESULTS  ·  PLAY OR STAR A STATION"
                 color: root.turquoise
                 font.family: root.panelFont
@@ -1226,7 +1297,7 @@ Panel {
                   border.width: 1
                   border.color: resultMouse.containsMouse
                     ? root.tint(root.turquoise, 0.55) : root.tint(root.sand, 0.18)
-                  Text {
+                  SafeText {
                     anchors.left: parent.left
                     anchors.right: resultDetail.left
                     anchors.leftMargin: Style.space(10)
@@ -1238,7 +1309,7 @@ Panel {
                     font.pixelSize: Style.font.bodySmall
                     elide: Text.ElideRight
                   }
-                  Text {
+                  SafeText {
                     id: resultDetail
                     width: parent.width * 0.28
                     anchors.right: resultStar.left
@@ -1252,7 +1323,7 @@ Panel {
                     horizontalAlignment: Text.AlignRight
                     elide: Text.ElideRight
                   }
-                  Text {
+                  SafeText {
                     id: resultStar
                     width: favoritable ? Style.space(34) : 0
                     anchors.right: parent.right
@@ -1287,7 +1358,7 @@ Panel {
               }
             }
 
-            Text {
+            SafeText {
               visible: root.hostWidget && root.hostWidget.providerSearchAttempted
                 && !root.hostWidget.providerBusy && root.hostWidget.providerResults.length === 0
               text: "No matching tracks or stations."
@@ -1297,7 +1368,7 @@ Panel {
               font.pixelSize: Style.font.bodySmall
             }
 
-            Text {
+            SafeText {
               visible: root.hostWidget && root.hostWidget.providerError !== ""
               width: parent.width
               text: root.hostWidget ? root.hostWidget.providerError : ""
@@ -1315,7 +1386,7 @@ Panel {
 
             Row {
               width: parent.width
-              Text {
+              SafeText {
                 width: parent.width - clearQueueButton.width
                 anchors.verticalCenter: parent.verticalCenter
                 text: "LIVE QUEUE  ·  " + (root.hostWidget ? root.hostWidget.queueTracks.length : 0) + " TRACKS"
@@ -1334,7 +1405,7 @@ Panel {
                 color: clearQueueMouse.containsMouse ? root.tint(root.adobe, 0.2) : "transparent"
                 border.width: 1
                 border.color: root.tint(root.adobe, available ? 0.6 : 0.2)
-                Text {
+                SafeText {
                   anchors.centerIn: parent
                   text: "CLEAR"
                   color: clearQueueButton.available ? root.adobe : root.mutedSand
@@ -1369,7 +1440,7 @@ Panel {
                   : queueRowMouse.containsMouse ? root.tint(root.mutedSand, 0.07) : "transparent"
                 border.width: 1
                 border.color: current ? root.turquoise : root.tint(root.mutedSand, 0.18)
-                Text {
+                SafeText {
                   x: Style.space(10)
                   width: parent.width - queueActions.width - Style.space(22)
                   anchors.verticalCenter: parent.verticalCenter
@@ -1399,7 +1470,7 @@ Panel {
                       height: Style.space(27)
                       radius: Style.cornerRadius
                       color: queueActionMouse.containsMouse ? root.tint(root.adobe, 0.18) : "transparent"
-                      Text {
+                      SafeText {
                         anchors.centerIn: parent
                         text: modelData.icon
                         color: root.sand
@@ -1430,7 +1501,7 @@ Panel {
               }
             }
 
-            Text {
+            SafeText {
               visible: root.hostWidget && root.hostWidget.queueTracks.length === 0
               width: parent.width
               text: "Queue is empty. Choose a station, collection, files, or a folder."
@@ -1447,7 +1518,7 @@ Panel {
             spacing: Style.space(10)
             visible: root.libraryTab === "more"
 
-            Text {
+            SafeText {
               text: "OUTPUT DEVICE"
               color: root.turquoise
               font.family: root.panelFont
@@ -1468,7 +1539,7 @@ Panel {
                   color: modelData.active ? root.tint(root.turquoise, 0.18) : "transparent"
                   border.width: 1
                   border.color: modelData.active ? root.turquoise : root.tint(root.mutedSand, 0.22)
-                  Text {
+                  SafeText {
                     id: deviceName
                     anchors.centerIn: parent
                     text: (modelData.active ? "●  " : "") + modelData.name
@@ -1485,7 +1556,7 @@ Panel {
               }
             }
 
-            Text {
+            SafeText {
               visible: root.hostWidget && root.hostWidget.audioDevices.length === 0
               text: "No switchable devices reported; CLIAMP is using the system default."
               color: root.mutedSand
@@ -1493,7 +1564,7 @@ Panel {
               font.pixelSize: Style.font.bodySmall
             }
 
-            Text {
+            SafeText {
               text: "RECENTLY PLAYED"
               color: root.adobe
               font.family: root.panelFont
@@ -1509,7 +1580,7 @@ Panel {
                 height: Style.space(34)
                 radius: Style.cornerRadius
                 color: historyMouse.containsMouse ? root.tint(root.turquoise, 0.09) : "transparent"
-                Text {
+                SafeText {
                   anchors.fill: parent
                   anchors.leftMargin: Style.space(9)
                   anchors.rightMargin: Style.space(9)
@@ -1530,7 +1601,7 @@ Panel {
                 }
               }
             }
-            Text {
+            SafeText {
               visible: root.hostWidget && root.hostWidget.historyItems.length === 0
               width: parent.width
               text: "No recently played tracks yet."
@@ -1541,7 +1612,7 @@ Panel {
               wrapMode: Text.WordWrap
             }
 
-            Text {
+            SafeText {
               text: "LYRICS"
               color: root.turquoise
               font.family: root.panelFont
@@ -1549,7 +1620,7 @@ Panel {
               font.bold: true
               font.letterSpacing: 1.2
             }
-            Text {
+            SafeText {
               width: parent.width
               text: {
                 if (!root.hostWidget || !root.hostWidget.lyricLines.length)
@@ -1579,7 +1650,7 @@ Panel {
               anchors.centerIn: parent
               width: parent.width - Style.space(28)
               spacing: Style.space(8)
-              Text {
+              SafeText {
                 anchors.horizontalCenter: parent.horizontalCenter
                 text: "PLAY LOCAL AUDIO"
                 color: root.sand
@@ -1606,7 +1677,7 @@ Panel {
                       ? root.tint(root.adobe, 0.22) : root.tint(root.adobe, 0.12)
                     border.width: 1
                     border.color: root.tint(root.adobe, available ? 1 : 0.3)
-                    Text {
+                    SafeText {
                       anchors.centerIn: parent
                       text: modelData.label
                       color: available ? root.sand : root.mutedSand
@@ -1626,7 +1697,7 @@ Panel {
                   }
                 }
               }
-              Text {
+              SafeText {
                 anchors.horizontalCenter: parent.horizontalCenter
                 width: Math.min(browserColumn.width - Style.space(30), implicitWidth)
                 visible: root.filePickerStatus !== ""
@@ -1668,7 +1739,7 @@ Panel {
                   : utilityMouse.containsMouse ? root.tint(root.adobe, 0.14) : "transparent"
                 border.width: 1
                 border.color: modelData.active ? root.turquoise : root.tint(root.mutedSand, 0.2)
-                Text {
+                SafeText {
                   anchors.centerIn: parent
                   width: parent.width - Style.space(5)
                   text: modelData.title
@@ -1711,6 +1782,7 @@ Panel {
               border.color: queueInput.activeFocus ? root.turquoise : root.tint(root.mutedSand, 0.25)
               TextInput {
                 id: queueInput
+                maximumLength: 4096
                 anchors.fill: parent
                 anchors.leftMargin: Style.space(11)
                 anchors.rightMargin: Style.space(11)
@@ -1721,7 +1793,7 @@ Panel {
                 font.family: root.panelFont
                 font.pixelSize: Style.font.bodySmall
                 clip: true
-                Text {
+                SafeText {
                   anchors.verticalCenter: parent.verticalCenter
                   visible: queueInput.text === "" && !queueInput.activeFocus
                   text: "PASTE A TRACK PATH OR STREAM URL…"
@@ -1746,7 +1818,7 @@ Panel {
               color: queueMouse.containsMouse ? root.tint(root.adobe, 0.28) : root.tint(root.adobe, 0.15)
               border.width: 1
               border.color: root.adobe
-              Text {
+              SafeText {
                 anchors.centerIn: parent
                 text: "QUEUE"
                 color: root.sand
@@ -1769,7 +1841,7 @@ Panel {
             }
           }
 
-          Text {
+          SafeText {
             visible: root.hostWidget && root.hostWidget.errorText !== ""
             width: parent.width
             text: root.hostWidget ? root.hostWidget.errorText : ""
@@ -1784,7 +1856,7 @@ Panel {
             }
           }
 
-          Text {
+          SafeText {
             width: parent.width
             text: "SPACE PLAY   ·   ←/→ SEEK OR SKIP   ·   ↑/↓ VOLUME   ·   N/P TRACK   ·   S/R/M/V MODES"
             color: root.mutedSand
@@ -1797,5 +1869,15 @@ Panel {
         }
       }
     }
+  }
+
+  Component.onDestruction: {
+    root.destroying = true
+    pickerLaunch.stop()
+    audioPickerWatchdog.stop()
+    audioPickerKill.stop()
+    // Teardown cannot rely on a Timer that is being destroyed. The helper's
+    // guardian observes its death and kills the complete Zenity process group.
+    if (audioPicker.running) audioPicker.signal(9)
   }
 }
