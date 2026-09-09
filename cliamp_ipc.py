@@ -386,6 +386,139 @@ def _read_frame(client: socket.socket, deadline: float) -> bytes:
             raise ProtocolError("CLIAMP response frame exceeds its byte limit")
 
 
+# --- CLIAMP v2 protocol adapter -------------------------------------------
+#
+# The installed CLIAMP (v2.0.1) rejects this file's pre-v2 raw request shape
+# ({"cmd": "status", ...}) outright with {"error":{"code":"invalid_version"}}
+# — confirmed by connecting to the socket directly. Its real v2 protocol was
+# captured off the wire (a socat relay in front of the real socket, observing
+# exactly what `cliamp remote call` sends), not guessed:
+#
+#   request:  {"version": 2, "id": "cliamp", "method": "operation.submit",
+#              "operation": "<op>", "params": {...}}
+#   response: {"version": 2, "id": "cliamp", "ok": true, "snapshot": {...}}
+#             for synchronous ops (e.g. "runtime.status"), or
+#             {"version": 2, "id": "cliamp", "ok": true,
+#              "job": {"state": "succeeded", "snapshot": {...}, "result": {...}}}
+#             for everything else (CLIAMP v2 treats most operations as async
+#             jobs, but the daemon completes them synchronously in practice —
+#             the response already carries the finished job), or
+#             {"version": 2, "id": "cliamp", "ok": false,
+#              "error": {"code": "...", "message": "..."}}
+#
+# normalize_request()'s per-command field whitelisting/bounds-checking below
+# is untouched and still runs first — this adapter only changes the wire
+# envelope around an already-validated v1-shaped request, and flattens an
+# already-received v2 response back into the flat shape normalize_response()
+# expects. Neither of those two security-critical functions (both in
+# cliamped_security.py) needed to change at all.
+#
+# CLIAMP v2's operation names match the old "cmd" names 1:1 for every command
+# this plugin actually sends, with one exception: bare "status" is now
+# "runtime.status". The one command with no v2 equivalent at all is "vis"
+# (switching the visualizer's render mode) — CLIAMP v2's operation list
+# (`cliamp remote capabilities`) has nothing for it, so it fails cleanly
+# instead of silently doing nothing.
+_V2_OPERATION_NAMES = {"status": "runtime.status"}
+_V2_UNSUPPORTED_COMMANDS = {"vis"}
+
+
+def _to_v2_envelope(v1_request: dict[str, Any]) -> dict[str, Any]:
+    command = v1_request["cmd"]
+    if command in _V2_UNSUPPORTED_COMMANDS:
+        raise ValidationError(f"{command} has no CLIAMP v2 operation")
+    operation = _V2_OPERATION_NAMES.get(command, command)
+    params = {key: value for key, value in v1_request.items() if key != "cmd"}
+    return {
+        "version": 2,
+        "id": "cliamp",
+        "method": "operation.submit",
+        "operation": operation,
+        "params": params,
+    }
+
+
+def _v2_response_to_v1(v2_response: Any) -> dict[str, Any]:
+    if not isinstance(v2_response, dict):
+        return {"ok": False, "error": "malformed CLIAMP response"}
+    if v2_response.get("ok") is not True:
+        error = v2_response.get("error")
+        message = error.get("message") if isinstance(error, dict) else error
+        return {"ok": False, "error": message if isinstance(message, str) else "CLIAMP request failed"}
+    flat: dict[str, Any] = {"ok": True}
+    snapshot = v2_response.get("snapshot")
+    if isinstance(snapshot, dict):
+        flat.update(snapshot)
+    job = v2_response.get("job")
+    if isinstance(job, dict):
+        job_snapshot = job.get("snapshot")
+        if isinstance(job_snapshot, dict):
+            flat.update(job_snapshot)
+        job_result = job.get("result")
+        if isinstance(job_result, dict):
+            flat.update(job_result)
+    return flat
+
+
+# CLIAMP v2 treats almost every operation as an async job: operation.submit's
+# immediate reply is often just {"job":{"state":"queued",...}} with no
+# result/snapshot yet — confirmed on the wire (a fresh socat capture of
+# `cliamp remote call provider.list --wait` showed exactly two requests: one
+# operation.submit, answered with state "queued", then one
+# {"method":"job.get","job_id":...}, answered with the finished job). Only
+# the synchronous read-only ops (runtime.status/runtime.snapshot) skip the
+# job envelope entirely and answer in one round trip. So: after the first
+# response, if it's a non-terminal job, poll job.get until it finishes or
+# this request's own deadline runs out (_remaining() already raises
+# TimeoutError past the deadline, so this can't loop forever even without
+# the attempt cap below).
+_V2_TERMINAL_JOB_STATES = {"succeeded", "failed", "cancelled", "canceled"}
+_V2_POLL_INTERVAL_SECONDS = 0.05
+_V2_POLL_MAX_ATTEMPTS = 200
+
+
+def _v2_job_is_terminal(decoded: Mapping[str, Any]) -> bool:
+    job = decoded.get("job")
+    if not isinstance(job, dict):
+        return True  # no job envelope (e.g. runtime.status) — already final
+    return job.get("state") in _V2_TERMINAL_JOB_STATES
+
+
+def _await_v2_completion(
+    client: socket.socket,
+    deadline: float,
+    decoded: dict[str, Any],
+    cumulative_response_bytes: int,
+) -> tuple[dict[str, Any], int]:
+    if decoded.get("ok") is not True or _v2_job_is_terminal(decoded):
+        return decoded, cumulative_response_bytes
+    job = decoded.get("job")
+    job_id = job.get("id") if isinstance(job, dict) else None
+    if not isinstance(job_id, str) or not job_id:
+        return decoded, cumulative_response_bytes
+
+    attempts = 0
+    while attempts < _V2_POLL_MAX_ATTEMPTS:
+        attempts += 1
+        client.settimeout(_remaining(deadline))
+        poll_payload = (
+            json.dumps({"version": 2, "id": "cliamp", "method": "job.get", "job_id": job_id})
+            + "\n"
+        ).encode("utf-8")
+        client.sendall(poll_payload)
+        _remaining(deadline)
+        line = _read_frame(client, deadline)
+        cumulative_response_bytes += len(line) + 1
+        if cumulative_response_bytes > MAX_BATCH_RESPONSE_BYTES:
+            raise ProtocolError("IPC batch exceeds its aggregate response byte limit")
+        decoded = _decode_response(line)
+        if decoded.get("ok") is not True or _v2_job_is_terminal(decoded):
+            return decoded, cumulative_response_bytes
+        time.sleep(_V2_POLL_INTERVAL_SECONDS)
+        _remaining(deadline)
+    return decoded, cumulative_response_bytes
+
+
 def _encode_requests(requests: Sequence[Mapping[str, Any]]) -> tuple[list[dict[str, Any]], list[bytes]]:
     if isinstance(requests, (str, bytes, bytearray)) or not isinstance(requests, Sequence):
         raise ValidationError("requests must be a sequence of objects")
@@ -396,7 +529,7 @@ def _encode_requests(requests: Sequence[Mapping[str, Any]]) -> tuple[list[dict[s
     total = 0
     for request in requests:
         clean = normalize_request(request)
-        payload = encode_json(clean, maximum=MAX_REQUEST_BYTES) + b"\n"
+        payload = encode_json(_to_v2_envelope(clean), maximum=MAX_REQUEST_BYTES) + b"\n"
         total += len(payload)
         if total > MAX_BATCH_REQUEST_BYTES:
             raise ValidationError("request batch exceeds its aggregate byte limit")
@@ -449,7 +582,11 @@ def send_requests(
             if cumulative_response_bytes > MAX_BATCH_RESPONSE_BYTES:
                 raise ProtocolError("IPC batch exceeds its aggregate response byte limit")
             decoded = _decode_response(line)
-            response = normalize_response(request, decoded, session_mode=peer.session_mode)
+            decoded, cumulative_response_bytes = _await_v2_completion(
+                client, deadline, decoded, cumulative_response_bytes
+            )
+            flat = _v2_response_to_v1(decoded)
+            response = normalize_response(request, flat, session_mode=peer.session_mode)
             _remaining(deadline)
             if retain_responses:
                 retained.append(response)
