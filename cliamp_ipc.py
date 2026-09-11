@@ -1,5 +1,5 @@
 #!/usr/bin/python3 -I
-"""Bounded, authenticated newline-framed client for CLIAMP's Unix socket."""
+"""Bounded, authenticated client for CLIAMP's version 2 Unix-socket API."""
 
 from __future__ import annotations
 
@@ -57,6 +57,8 @@ MAX_SOCKET_PATH_BYTES = 103
 MAX_PID_FILE_BYTES = 64
 MAX_CMDLINE_BYTES = 4096
 RECEIVE_CHUNK_BYTES = 16 * 1024
+PROTOCOL_VERSION = 2
+JOB_POLL_SECONDS = 0.1
 _LIBC = ctypes.CDLL(None, use_errno=True)
 
 
@@ -386,6 +388,38 @@ def _read_frame(client: socket.socket, deadline: float) -> bytes:
             raise ProtocolError("CLIAMP response frame exceeds its byte limit")
 
 
+def _request_id(index: int, *, job: bool = False) -> str:
+    suffix = "-job" if job else ""
+    return f"cliamped-{index}{suffix}"
+
+
+def _v2_request(request: Mapping[str, Any], request_id: str) -> dict[str, Any]:
+    command = request["cmd"]
+    if command == "status":
+        return {
+            "version": PROTOCOL_VERSION,
+            "id": request_id,
+            "method": "state.get",
+        }
+    if command == "bands":
+        return {
+            "version": PROTOCOL_VERSION,
+            "id": request_id,
+            "method": "spectrum.get",
+        }
+    return {
+        "version": PROTOCOL_VERSION,
+        "id": request_id,
+        "method": "operation.submit",
+        "operation": command,
+        "params": {key: value for key, value in request.items() if key != "cmd"},
+    }
+
+
+def _encode_v2(value: Mapping[str, Any]) -> bytes:
+    return encode_json(value, maximum=MAX_REQUEST_BYTES) + b"\n"
+
+
 def _encode_requests(requests: Sequence[Mapping[str, Any]]) -> tuple[list[dict[str, Any]], list[bytes]]:
     if isinstance(requests, (str, bytes, bytearray)) or not isinstance(requests, Sequence):
         raise ValidationError("requests must be a sequence of objects")
@@ -394,15 +428,81 @@ def _encode_requests(requests: Sequence[Mapping[str, Any]]) -> tuple[list[dict[s
     normalized: list[dict[str, Any]] = []
     payloads: list[bytes] = []
     total = 0
-    for request in requests:
+    for index, request in enumerate(requests):
         clean = normalize_request(request)
-        payload = encode_json(clean, maximum=MAX_REQUEST_BYTES) + b"\n"
+        payload = _encode_v2(_v2_request(clean, _request_id(index)))
         total += len(payload)
         if total > MAX_BATCH_REQUEST_BYTES:
             raise ValidationError("request batch exceeds its aggregate byte limit")
         normalized.append(clean)
         payloads.append(payload)
     return normalized, payloads
+
+
+def _v2_error(response: Mapping[str, Any]) -> dict[str, Any]:
+    error = response.get("error")
+    if not isinstance(error, Mapping):
+        return {"ok": False, "error": "CLIAMP request failed"}
+    detail = error.get("detail")
+    message = detail if isinstance(detail, str) and detail else error.get("message")
+    return {
+        "ok": False,
+        "error": message if isinstance(message, str) and message else "CLIAMP request failed",
+    }
+
+
+def _validated_v2_response(line: bytes, expected_id: str) -> dict[str, Any]:
+    response = _decode_response(line)
+    if type(response.get("version")) is not int or response["version"] != PROTOCOL_VERSION:
+        raise ProtocolError("CLIAMP returned an unsupported protocol version")
+    if response.get("id") != expected_id:
+        raise ProtocolError("CLIAMP response ID does not match its request")
+    if type(response.get("ok")) is not bool:
+        raise ProtocolError("CLIAMP V2 response requires a boolean ok field")
+    return response
+
+
+def _direct_v2_result(request: Mapping[str, Any], response: Mapping[str, Any]) -> dict[str, Any]:
+    if not response["ok"]:
+        return _v2_error(response)
+    field = "snapshot" if request["cmd"] == "status" else "result"
+    result = response.get(field)
+    if not isinstance(result, Mapping):
+        raise ProtocolError(f"CLIAMP V2 {field} is not an object")
+    legacy = dict(result)
+    legacy["ok"] = True
+    return legacy
+
+
+def _terminal_job_result(
+    response: Mapping[str, Any], expected_job_id: str
+) -> dict[str, Any] | None:
+    if not response["ok"]:
+        return _v2_error(response)
+    job = response.get("job")
+    if not isinstance(job, Mapping) or not isinstance(job.get("id"), str) or not job["id"]:
+        raise ProtocolError("CLIAMP V2 response does not contain a valid job")
+    if job["id"] != expected_job_id:
+        raise ProtocolError("CLIAMP V2 job ID does not match its submission")
+    state = job.get("state")
+    if state in {"queued", "running"}:
+        return None
+    if state in {"failed", "canceled"}:
+        return _v2_error(job)
+    if state != "succeeded":
+        raise ProtocolError("CLIAMP V2 job has an invalid state")
+    result = job.get("result", {})
+    snapshot = job.get("snapshot", {})
+    if result is None:
+        result = {}
+    if snapshot is None:
+        snapshot = {}
+    if not isinstance(result, Mapping) or not isinstance(snapshot, Mapping):
+        raise ProtocolError("CLIAMP V2 job result is not an object")
+    merged = dict(snapshot)
+    merged.update(result)
+    merged["ok"] = True
+    return merged
 
 
 def send_requests(
@@ -432,6 +532,7 @@ def send_requests(
     endpoint = _open_endpoint(path)
     client: socket.socket | None = None
     retained: list[dict[str, Any]] = []
+    cumulative_request_bytes = 0
     cumulative_response_bytes = 0
     try:
         client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -440,7 +541,11 @@ def send_requests(
         _remaining(deadline)
         _validate_endpoint_stability(endpoint)
         peer = _validate_peer(client, endpoint, trusted_executable, trusted_before)
-        for request, payload in zip(normalized, payloads, strict=True):
+        def exchange(payload: bytes, expected_id: str) -> dict[str, Any]:
+            nonlocal cumulative_request_bytes, cumulative_response_bytes
+            cumulative_request_bytes += len(payload)
+            if cumulative_request_bytes > MAX_BATCH_REQUEST_BYTES:
+                raise ProtocolError("IPC batch exceeds its aggregate request byte limit")
             client.settimeout(_remaining(deadline))
             client.sendall(payload)
             _remaining(deadline)
@@ -448,8 +553,34 @@ def send_requests(
             cumulative_response_bytes += len(line) + 1
             if cumulative_response_bytes > MAX_BATCH_RESPONSE_BYTES:
                 raise ProtocolError("IPC batch exceeds its aggregate response byte limit")
-            decoded = _decode_response(line)
-            response = normalize_response(request, decoded, session_mode=peer.session_mode)
+            return _validated_v2_response(line, expected_id)
+
+        for index, (request, payload) in enumerate(zip(normalized, payloads, strict=True)):
+            request_id = _request_id(index)
+            decoded = exchange(payload, request_id)
+            if request["cmd"] in {"status", "bands"}:
+                legacy = _direct_v2_result(request, decoded)
+            elif not decoded["ok"]:
+                legacy = _v2_error(decoded)
+            else:
+                job = decoded.get("job")
+                if not isinstance(job, Mapping) or not isinstance(job.get("id"), str) or not job["id"]:
+                    raise ProtocolError("CLIAMP V2 submission did not return a valid job")
+                job_id = job["id"]
+                job_request_id = _request_id(index, job=True)
+                legacy = _terminal_job_result(decoded, job_id)
+                while legacy is None:
+                    time.sleep(min(JOB_POLL_SECONDS, _remaining(deadline)))
+                    poll = {
+                        "version": PROTOCOL_VERSION,
+                        "id": job_request_id,
+                        "method": "job.get",
+                        "job_id": job_id,
+                    }
+                    legacy = _terminal_job_result(
+                        exchange(_encode_v2(poll), job_request_id), job_id
+                    )
+            response = normalize_response(request, legacy, session_mode=peer.session_mode)
             _remaining(deadline)
             if retain_responses:
                 retained.append(response)

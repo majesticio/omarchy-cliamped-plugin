@@ -918,7 +918,7 @@ BarWidget {
     id: panelLoader
     active: true
     // Keep this query aligned with manifest.json so Qt drops stale panel components on updates.
-    source: Qt.resolvedUrl("Panel.qml") + "?v=1.2.0"
+    source: Qt.resolvedUrl("Panel.qml") + "?v=1.2.1"
     visible: false
     onLoaded: {
       root.injectPanel()

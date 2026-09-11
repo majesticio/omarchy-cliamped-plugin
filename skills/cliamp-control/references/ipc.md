@@ -2,7 +2,7 @@
 
 Read this reference only for structured operations not covered by the public CLI.
 
-CLIAMP listens on `${XDG_CONFIG_HOME:-$HOME/.config}/cliamp/cliamp.sock`. Requests and responses are JSON objects terminated by one newline. Never issue concurrent requests on the same connection or reuse a response from a previous command.
+CLIAMP listens on `${XDG_CONFIG_HOME:-$HOME/.config}/cliamp/cliamp.sock`. CLIAMPed's helper accepts the bounded command objects shown below, translates them to CLIAMP's version 2 envelopes, correlates request and job IDs, and waits for terminal jobs. Never issue concurrent requests on the same connection or reuse a response from a previous command.
 
 From this repository, use the serialized client rather than writing ad hoc socket code:
 

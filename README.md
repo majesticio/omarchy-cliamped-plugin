@@ -18,7 +18,7 @@ Its visualizer and controls take their colors from the current Omarchy theme rat
 - Automatic attachment to an existing CLIAMP TUI or daemon
 - A self-started background daemon when CLIAMP is not already running
 
-CLIAMPed uses authenticated, size-limited, deadline-bound CLIAMP Unix-socket IPC and serializes requests so concurrent panel actions cannot corrupt responses. File and folder selection runs behind a bounded Zenity supervisor, keeping native picker failures outside Quickshell. The complete runtime trust model and limits are documented in [`SECURITY.md`](SECURITY.md).
+CLIAMPed uses CLIAMP's version 2 Unix-socket API with authenticated peers, correlated request and job IDs, bounded frames, and absolute deadlines. It serializes requests so concurrent panel actions cannot corrupt responses. File and folder selection runs behind a bounded Zenity supervisor, keeping native picker failures outside Quickshell. The complete runtime trust model and limits are documented in [`SECURITY.md`](SECURITY.md).
 
 ## Theme gallery
 
@@ -59,7 +59,7 @@ Supported extensions are MP3, FLAC, Ogg Vorbis, Opus, WAV, M4A, AAC, and WMA.
 Requirements:
 
 - Omarchy with shell plugin support
-- CLIAMP 1.63 or newer installed at `/usr/bin/cliamp`
+- CLIAMP 2.0 or newer installed at `/usr/bin/cliamp`
 - Python 3 installed at `/usr/bin/python3`
 - Zenity installed at `/usr/bin/zenity`
 

@@ -98,21 +98,28 @@ class AuthenticatedTransportTests(unittest.TestCase):
                 cliamp_ipc._validate_trusted_executable(str(executable))
 
     def test_authenticates_peer_and_returns_normalized_status(self):
-        with UnixPeer([b'{"ok":true,"state":"playing","ignored":"value"}\n']) as peer:
+        with UnixPeer([
+            b'{"version":2,"id":"cliamped-0","ok":true,'
+            b'"snapshot":{"state":"playing","ignored":"value"}}\n'
+        ]) as peer:
             response = send_to(peer)
 
         self.assertEqual(response["state"], "playing")
         self.assertIn(response["session_mode"], {"tui", "unknown"})
         self.assertNotIn("ignored", response)
-        self.assertEqual(peer.requests, [{"cmd": "status"}])
+        self.assertEqual(peer.requests, [{
+            "version": 2,
+            "id": "cliamped-0",
+            "method": "state.get",
+        }])
 
     def test_requires_response_newline(self):
-        with UnixPeer([b'{"ok":true}']) as peer:
+        with UnixPeer([b'{"version":2,"id":"cliamped-0","ok":true,"snapshot":{}}']) as peer:
             with self.assertRaisesRegex(cliamp_ipc.ProtocolError, "before the response newline"):
                 send_to(peer)
 
     def test_rejects_trailing_non_whitespace(self):
-        with UnixPeer([b'{"ok":true}\nsecond frame']) as peer:
+        with UnixPeer([b'{"version":2,"id":"cliamped-0","ok":true,"snapshot":{}}\nsecond frame']) as peer:
             with self.assertRaisesRegex(cliamp_ipc.ProtocolError, "trailing data"):
                 send_to(peer)
 
@@ -172,7 +179,17 @@ class AuthenticatedTransportTests(unittest.TestCase):
                 )
 
     def test_serialized_batch_uses_one_connection_and_can_discard_intermediates(self):
-        replies = [b'{"ok":true}\n', b'{"ok":true,"tracks":[]}\n']
+        replies = [
+            b'{"version":2,"id":"cliamped-0","ok":true,'
+            b'"job":{"id":"play-job","state":"queued"}}\n',
+            b'{"version":2,"id":"cliamped-0-job","ok":true,'
+            b'"job":{"id":"play-job","state":"succeeded","result":{"ok":true}}}\n',
+            b'{"version":2,"id":"cliamped-1","ok":true,'
+            b'"job":{"id":"queue-job","state":"queued"}}\n',
+            b'{"version":2,"id":"cliamped-1-job","ok":true,'
+            b'"job":{"id":"queue-job","state":"succeeded",'
+            b'"result":{"ok":true,"tracks":[]}}}\n',
+        ]
         with UnixPeer(replies) as peer:
             responses = cliamp_ipc.send_requests(
                 [
@@ -185,7 +202,65 @@ class AuthenticatedTransportTests(unittest.TestCase):
             )
 
         self.assertEqual(responses, [{"ok": True, "tracks": []}])
-        self.assertEqual(len(peer.requests), 2)
+        self.assertEqual(len(peer.requests), 4)
+        self.assertEqual(peer.requests[0]["operation"], "track.play")
+        self.assertEqual(peer.requests[0]["params"], {"track": {"path": "/music/one.mp3"}})
+        self.assertEqual(peer.requests[1]["method"], "job.get")
+        self.assertEqual(peer.requests[2]["operation"], "queue.list")
+        self.assertEqual(peer.requests[3]["job_id"], "queue-job")
+
+    def test_job_polls_share_the_aggregate_request_limit(self):
+        replies = [
+            b'{"version":2,"id":"cliamped-0","ok":true,'
+            b'"job":{"id":"polling-job","state":"queued"}}\n',
+        ]
+        with UnixPeer(replies) as peer:
+            with unittest.mock.patch.object(
+                cliamp_ipc, "MAX_BATCH_REQUEST_BYTES", 130
+            ), self.assertRaisesRegex(cliamp_ipc.ProtocolError, "request byte limit"):
+                send_to(peer, {"cmd": "play"})
+
+    def test_rejects_mismatched_v2_response_id(self):
+        with UnixPeer([
+            b'{"version":2,"id":"another-client","ok":true,"snapshot":{}}\n'
+        ]) as peer:
+            with self.assertRaisesRegex(cliamp_ipc.ProtocolError, "ID does not match"):
+                send_to(peer)
+
+    def test_successful_envelope_overrides_nested_ok_field(self):
+        with UnixPeer([
+            b'{"version":2,"id":"cliamped-0","ok":true,'
+            b'"snapshot":{"ok":false,"state":"playing"}}\n'
+        ]) as peer:
+            response = send_to(peer)
+
+        self.assertTrue(response["ok"])
+        self.assertEqual(response["state"], "playing")
+
+    def test_rejects_mismatched_terminal_job_id(self):
+        replies = [
+            b'{"version":2,"id":"cliamped-0","ok":true,'
+            b'"job":{"id":"expected-job","state":"queued"}}\n',
+            b'{"version":2,"id":"cliamped-0-job","ok":true,'
+            b'"job":{"id":"other-job","state":"succeeded","result":{"ok":true}}}\n',
+        ]
+        with UnixPeer(replies) as peer:
+            with self.assertRaisesRegex(cliamp_ipc.ProtocolError, "job ID does not match"):
+                send_to(peer, {"cmd": "play"})
+
+    def test_surfaces_terminal_v2_job_error_detail(self):
+        replies = [
+            b'{"version":2,"id":"cliamped-0","ok":true,'
+            b'"job":{"id":"failed-job","state":"queued"}}\n',
+            b'{"version":2,"id":"cliamped-0-job","ok":true,'
+            b'"job":{"id":"failed-job","state":"failed",'
+            b'"error":{"code":"internal_error","message":"operation failed",'
+            b'"detail":"provider unavailable"}}}\n',
+        ]
+        with UnixPeer(replies) as peer:
+            response = send_to(peer, {"cmd": "play"})
+
+        self.assertEqual(response, {"ok": False, "error": "provider unavailable"})
 
 
 class SchemaBoundaryTests(unittest.TestCase):

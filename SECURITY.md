@@ -8,7 +8,9 @@ are untrusted.
 
 ## IPC
 
-- Each request and response is a required newline-terminated JSON object.
+- Each request and response is a required newline-terminated CLIAMP version 2
+  JSON envelope. Response IDs must match their requests; submitted operations
+  are polled to a terminal job whose ID must match the original submission.
 - Requests are limited to 64 KiB, responses to 1 MiB on the wire, and normalized
   helper output to 256 KiB. Serialized batches are capped at 256 requests,
   256 KiB outbound, and 4 MiB inbound.
@@ -18,7 +20,8 @@ are untrusted.
   socket and PID file must be owner-only objects. After connecting, the helper
   checks `SO_PEERCRED`, the PID file, the socket inode, and the peer executable
   inode against `/usr/bin/cliamp`.
-- Requests and responses use command-specific schemas. Unknown commands,
+- The helper's command objects and CLIAMP's version 2 envelopes use strict,
+  command-specific schemas. Unknown commands,
   malformed types, duplicate JSON keys, non-finite numbers, unknown item
   fields, oversized fields, and excess aggregate model data are rejected.
 
