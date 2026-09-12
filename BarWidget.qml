@@ -32,6 +32,7 @@ BarWidget {
   property string trackTitle: "CLIAMPed"
   property string trackArtist: ""
   property string trackAlbum: ""
+  property string trackStation: ""
   property string trackPath: ""
   property real positionSeconds: 0
   property real durationSeconds: 0
@@ -149,10 +150,12 @@ BarWidget {
   }
   readonly property string sessionLabel: sessionMode === "headless" ? "BACKGROUND"
     : sessionMode === "tui" ? "CLIAMP TUI" : "CONNECTING"
-  readonly property string selectedStation: stationNameFor(trackPath)
+  readonly property string selectedStation: trackStation || stationNameFor(trackPath)
+  readonly property string trackSubtitle: [trackArtist, trackAlbum,
+    selectedStation !== trackTitle ? selectedStation : ""].filter(function(value) { return !!value }).join("  ·  ")
   readonly property var bands: bandStream.bands
   readonly property string barLabel: sessionReady
-    ? ((playing ? "󰝚" : "󰏤") + "  " + plainLabel(selectedStation || trackTitle || "CLIAMP", 256))
+    ? ((playing ? "󰝚" : "󰏤") + "  " + plainLabel(trackTitle || "CLIAMP", 256))
     : "󰝚  CLIAMP"
 
   function cleanText(value, limit) {
@@ -251,6 +254,33 @@ BarWidget {
       result.push(track)
     }
     return result
+  }
+
+  function metadataText(value) {
+    return value.replace(/\s+/g, " ").trim()
+  }
+
+  function nowPlayingMetadata(track) {
+    var title = metadataText(track.title)
+    var artist = metadataText(track.artist)
+    var station = metadataText(track.station) || stationNameFor(track.path)
+    var liveTitle = metadataText(track.stream_title)
+    // Live metadata is provider-independent. Preserve an unsplit show title;
+    // only interpret the conventional separator when both sides are present.
+    if (liveTitle) {
+      var separator = liveTitle.indexOf(" - ")
+      var liveArtist = separator >= 0 ? liveTitle.slice(0, separator).trim() : ""
+      var song = separator >= 0 ? liveTitle.slice(separator + 3).trim() : ""
+      title = liveArtist && song ? song : liveTitle
+      artist = liveArtist && song ? liveArtist : ""
+    }
+    var fallback = track.path.split("/").pop().replace(/\.[^.]+$/, "")
+    return {
+      title: title || station || cleanText(fallback, 256) || "CLIAMPed",
+      artist: artist,
+      album: metadataText(track.album),
+      station: station
+    }
   }
 
   function trackCharacterCost(track) {
@@ -706,16 +736,17 @@ BarWidget {
       durationSeconds = cleanNumber(value.duration, 0, 31536000, 0)
       var statusTrack = normalizeTrack(value.track)
       if (statusTrack) {
-        var fallbackTitle = statusTrack.path.split("/").pop()
-        fallbackTitle = fallbackTitle.replace(/\.[^.]+$/, "")
-        trackTitle = cleanText(statusTrack.title || fallbackTitle || "CLIAMPed", 256)
-        trackArtist = statusTrack.artist
-        trackAlbum = statusTrack.album
+        var metadata = nowPlayingMetadata(statusTrack)
+        trackTitle = metadata.title
+        trackArtist = metadata.artist
+        trackAlbum = metadata.album
+        trackStation = metadata.station
         trackPath = statusTrack.path
       } else {
         trackTitle = "CLIAMPed"
         trackArtist = ""
         trackAlbum = ""
+        trackStation = ""
         trackPath = ""
       }
       return true
@@ -918,7 +949,7 @@ BarWidget {
     id: panelLoader
     active: true
     // Keep this query aligned with manifest.json so Qt drops stale panel components on updates.
-    source: Qt.resolvedUrl("Panel.qml") + "?v=1.2.1"
+    source: Qt.resolvedUrl("Panel.qml") + "?v=1.2.2"
     visible: false
     onLoaded: {
       root.injectPanel()
@@ -938,6 +969,7 @@ BarWidget {
     fixedWidth: barContent.implicitWidth + Style.space(18)
     tooltipText: root.sessionReady
       ? ((root.playing ? "Playing " : "Paused ") + root.plainLabel(root.trackTitle || "CLIAMP", 256)
+        + (root.trackSubtitle ? " · " + root.plainLabel(root.trackSubtitle, 768) : "")
         + " · left: panel · middle: play/pause · right: next")
       : "CLIAMPed is starting…"
 
@@ -968,7 +1000,7 @@ BarWidget {
       }
       SafeText {
         anchors.verticalCenter: parent.verticalCenter
-        text: root.selectedStation || root.trackTitle || "Radio"
+        text: root.trackTitle || root.selectedStation || "Radio"
         color: root.bar.barForeground
         font.family: root.bar ? root.bar.fontFamily : Style.font.family
         font.pixelSize: Style.font.body

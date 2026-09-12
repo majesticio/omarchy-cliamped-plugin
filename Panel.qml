@@ -318,7 +318,7 @@ Panel {
                   SafeText {
                     width: parent.width
                     text: root.hostWidget
-                      ? (root.hostWidget.selectedStation || root.hostWidget.trackTitle || "CLIAMPed")
+                      ? (root.hostWidget.trackTitle || "CLIAMPed")
                       : "CLIAMPed"
                     color: root.sand
                     font.family: root.panelFont
@@ -327,11 +327,10 @@ Panel {
                     elide: Text.ElideRight
                   }
                   SafeText {
-                    text: root.hostWidget && root.hostWidget.trackArtist
-                      ? (root.hostWidget.trackArtist + (root.hostWidget.trackAlbum
-                        ? "  ·  " + root.hostWidget.trackAlbum : "")).toUpperCase()
-                      : (root.hostWidget && root.hostWidget.selectedStation
-                        ? root.hostWidget.trackTitle.toUpperCase() : "CLIAMP MEDIA")
+                    width: parent.width
+                    text: root.hostWidget && root.hostWidget.trackSubtitle
+                      ? root.hostWidget.trackSubtitle : "CLIAMP MEDIA"
+                    elide: Text.ElideRight
                     color: root.adobe
                     font.family: root.panelFont
                     font.pixelSize: Style.font.caption
@@ -1444,9 +1443,10 @@ Panel {
                   x: Style.space(10)
                   width: parent.width - queueActions.width - Style.space(22)
                   anchors.verticalCenter: parent.verticalCenter
+                  readonly property string displayTitle: current ? root.hostWidget.trackTitle : (modelData.title || modelData.path)
+                  readonly property string displayArtist: current ? root.hostWidget.trackArtist : (modelData.artist || "")
                   text: (current ? "▶  " : (index + 1) + ".  ")
-                    + (modelData.title || modelData.path)
-                    + (modelData.artist ? "  ·  " + modelData.artist : "")
+                    + displayTitle + (displayArtist ? "  ·  " + displayArtist : "")
                   color: current ? root.sand : root.mutedSand
                   font.family: root.panelFont
                   font.pixelSize: Style.font.bodySmall

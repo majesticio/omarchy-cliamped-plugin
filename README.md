@@ -10,6 +10,7 @@ Its visualizer and controls take their colors from the current Omarchy theme rat
 - Spectrum, Canyon, and Voxtype-inspired Pulse views driven by `cliamp visstream`
 - A synchronized mini visualizer in the bar
 - Eleven curated CLIAMP stations over HTTPS
+- Live song titles and station context for any stream whose metadata CLIAMP exposes
 - CLIAMP source and collection browsing, including Radio Browser favorites and its paged catalog
 - Real queue inspection, play-next, removal, and clearing
 - Multiple-file and recursive whole-folder playback
@@ -39,6 +40,7 @@ These views have distinct jobs:
 
 Selecting a collection replaces the active list and starts its first track. Selecting a station or source search result also starts it immediately.
 CLIAMPed resolves CLIAMP Radio's built-in M3U index through CLIAMP's `url.load` IPC endpoint before playback.
+Now Playing and the bar show live song metadata from any station, including directory entries and custom URLs. The panel keeps the artist and station beneath the song title. Streams without live metadata retain their supplied title or station name.
 The Radio Browser directory loads automatically; use ☆ and ★ on directory or search-result cards to add or remove Favorites. Because CLIAMP's search IPC omits the playlist IDs required by its native favorite endpoint, searched-station favorites are stored separately in `~/.config/cliamp/cliamped_search_favorites.json` and merged into the same Favorites view.
 
 ## Local files and folders
@@ -53,6 +55,7 @@ The Files tab offers **Choose Files…** and **Add Folder…**. CLIAMPed closes 
 - play the first track and put every remaining track in CLIAMP's Queue.
 
 Supported extensions are MP3, FLAC, Ogg Vorbis, Opus, WAV, M4A, AAC, and WMA.
+When `/usr/bin/ffprobe` is available, file and folder imports read embedded title, artist, album, and genre tags before queueing. Missing tags, unavailable probes, and probe failures fall back to the filename. Metadata probing has a five-second budget per import. Tracks already loaded by CLIAMP use the metadata it supplies.
 
 ## Installation
 

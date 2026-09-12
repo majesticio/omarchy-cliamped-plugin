@@ -65,6 +65,13 @@ deadline. CLIAMP has no transactional batch endpoint, so imports use bounded
 sequential frames on that connection and stop on the first rejection; a daemon
 failure can leave a strictly bounded partial import.
 
+Optional local metadata probes execute the protected `/usr/bin/ffprobe` package
+object against a descriptor-pinned regular file opened without symlink traversal.
+They admit only local-file protocol access and supported audio containers, inherit
+the picker’s bounded output collection and process-group guardian, and have a
+one-second per-file deadline within a five-second import budget (plus bounded
+teardown). Missing or unreadable tags fall back to filenames.
+
 Search favorites are limited to a 128 KiB file, 128 strict HTTP(S) records, and
 64 KiB of normalized model data. Reads are nonblocking, bounded, regular-file,
 owner, link-count, and no-follow checked relative to a private directory

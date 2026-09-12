@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 import ctypes
+import json
 import math
 import os
 from pathlib import Path
@@ -63,6 +64,10 @@ ZENITY_DEADLINE_SECONDS = 300.0
 MAX_ZENITY_STDOUT_BYTES = MAX_SELECTION_PATH_BYTES + MAX_SELECTIONS
 MAX_ZENITY_STDERR_BYTES = 16 * 1024
 PROCESS_TERMINATION_GRACE_SECONDS = 1.0
+
+FFPROBE_EXECUTABLE = "/usr/bin/ffprobe"
+METADATA_DEADLINE_SECONDS = 5.0
+METADATA_FILE_SECONDS = 1.0
 
 IPC_BATCH_DEADLINE_SECONDS = 30.0
 MAX_ERROR_BYTES = 512
@@ -484,24 +489,28 @@ def expand_selections(
 
 
 def _open_zenity() -> int:
-    """Open and validate the fixed Zenity object for descriptor-backed exec."""
+    return _open_package_executable(ZENITY_EXECUTABLE, ZENITY_DIRECTORY)
+
+
+def _open_package_executable(executable_path: str, directory_path: str) -> int:
+    """Open and validate the fixed package object for descriptor-backed exec."""
 
     if (
-        not os.path.isabs(ZENITY_EXECUTABLE)
-        or os.path.dirname(ZENITY_EXECUTABLE) != ZENITY_DIRECTORY
+        not os.path.isabs(executable_path)
+        or os.path.dirname(executable_path) != directory_path
         or not hasattr(os, "O_PATH")
     ):
-        raise PickerBoundaryError("the supported file chooser path is invalid")
+        raise PickerBoundaryError("the supported helper path is invalid")
     directory_fd = -1
     executable_fd = -1
     try:
         directory_fd = os.open(
-            ZENITY_DIRECTORY,
+            directory_path,
             os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
         )
         directory = os.fstat(directory_fd)
         executable_fd = os.open(
-            os.path.basename(ZENITY_EXECUTABLE),
+            os.path.basename(executable_path),
             os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC,
             dir_fd=directory_fd,
         )
@@ -509,7 +518,7 @@ def _open_zenity() -> int:
     except OSError as error:
         if executable_fd >= 0:
             os.close(executable_fd)
-        raise PickerBoundaryError("the supported /usr/bin/zenity executable is unavailable") from error
+        raise PickerBoundaryError("the supported helper executable is unavailable") from error
     finally:
         if directory_fd >= 0:
             os.close(directory_fd)
@@ -525,7 +534,7 @@ def _open_zenity() -> int:
         or executable.st_uid == os.geteuid()
     ):
         os.close(executable_fd)
-        raise PickerBoundaryError("the file chooser executable is not a protected package object")
+        raise PickerBoundaryError("the helper executable is not a protected package object")
     return executable_fd
 
 
@@ -899,13 +908,80 @@ def _validate_queue_paths(paths: Sequence[str]) -> list[str]:
         return result
 
 
+def _file_metadata(path: str, deadline: float) -> dict[str, str]:
+    """Best-effort tags from a bounded, local-only probe of a validated file."""
+    if _stop_requested:
+        raise PickerBoundaryError("file selection was interrupted")
+    if time.monotonic() >= deadline:
+        return {}
+    executable_fd = file_fd = -1
+    process = None
+    guardian = None
+    try:
+        executable_fd = _open_package_executable(FFPROBE_EXECUTABLE, "/usr/bin")
+        file_fd, file_info = _open_path_without_symlinks(path)
+        if not stat.S_ISREG(file_info.st_mode):
+            return {}
+        expected_parent = os.getpid()
+        process = subprocess.Popen(
+            [FFPROBE_EXECUTABLE, "-v", "error", "-probesize", "1048576",
+             "-analyzeduration", "0", "-protocol_whitelist", "file",
+             "-format_whitelist", "mp3,flac,ogg,wav,mov,aac,asf",
+             "-show_entries", "format_tags=title,artist,album,genre:stream_tags=title,artist,album,genre",
+             "-of", "json", f"/proc/self/fd/{file_fd}"],
+            executable=f"/proc/self/fd/{executable_fd}",
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            env={"PATH": "/usr/bin", "LANG": "C.UTF-8"},
+            start_new_session=True, close_fds=True, pass_fds=(executable_fd, file_fd),
+            preexec_fn=lambda: _set_parent_death_signal(expected_parent),
+        )
+        guardian = _start_guardian(process)
+        stdout, _stderr = _collect_process_output(
+            process, min(deadline, time.monotonic() + METADATA_FILE_SECONDS)
+        )
+        if process.returncode != 0:
+            return {}
+        data = json.loads(stdout)
+        if not isinstance(data, dict):
+            return {}
+        containers = [data.get("format", {})]
+        streams = data.get("streams", [])
+        if isinstance(streams, list):
+            containers.extend(streams)
+        result = {}
+        for container in containers:
+            tags = container.get("tags", {}) if isinstance(container, dict) else {}
+            if not isinstance(tags, dict):
+                continue
+            for key, value in tags.items():
+                field = key.lower()
+                if field in {"title", "artist", "album", "genre"} and isinstance(value, str):
+                    text = " ".join(display_text(value).split())
+                    if text and field not in result:
+                        result[field] = text
+        return result
+    except (OSError, ValueError, RecursionError, PickerBoundaryError):
+        if _stop_requested:
+            raise PickerBoundaryError("file selection was interrupted")
+        return {}
+    finally:
+        if process is not None:
+            _finish_guardian(process, guardian)
+        for descriptor in (file_fd, executable_fd):
+            if descriptor >= 0:
+                os.close(descriptor)
+
+
 def load_paths(paths: Sequence[str]) -> dict[str, Any]:
     validated = _validate_queue_paths(paths)
     requests: list[dict[str, Any]] = []
+    metadata_deadline = time.monotonic() + METADATA_DEADLINE_SECONDS
     for index, path in enumerate(validated):
+        track = {"title": display_text(Path(path).stem), "path": path}
+        track.update(_file_metadata(path, metadata_deadline))
         requests.append({
             "cmd": "track.play" if index == 0 else "track.queue",
-            "track": {"title": display_text(Path(path).stem), "path": path},
+            "track": track,
         })
     requests.append({"cmd": "queue.list"})
 
