@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "io.github.majesticio.cliamped",
   "name": "CLIAMPed",
-  "version": "1.2.2",
+  "version": "1.3.0",
   "author": "majesticio",
   "license": "MIT",
-  "description": "A theme-aware CLIAMP control center with radio discovery, favorites, queue, local media, and reactive visualizers",
+  "description": "A theme-aware CLIAMP control center with radio discovery, favorites, your music library, queue, local media, and reactive visualizers",
   "kinds": [
     "bar-widget"
   ],
@@ -14,7 +14,7 @@
   },
   "barWidget": {
     "displayName": "CLIAMPed",
-    "description": "CLIAMP playback, radio discovery, favorites, queue, local media, and reactive visualizers",
+    "description": "CLIAMP playback, radio discovery, favorites, library browsing, queue, local media, and reactive visualizers",
     "category": "Media",
     "allowMultiple": false,
     "defaultSection": "center"

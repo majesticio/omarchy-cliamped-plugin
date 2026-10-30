@@ -21,6 +21,7 @@ Useful read operations:
 {"cmd":"provider.playlists","provider":"radio"}
 {"cmd":"provider.catalog","provider":"radio","offset":0,"limit":18}
 {"cmd":"provider.search","provider":"radio","query":"jazz","limit":18}
+{"cmd":"provider.tracks","provider":"local","playlist":"<playlist id>","offset":0,"limit":200}
 {"cmd":"history","limit":24}
 {"cmd":"lyrics"}
 {"cmd":"device","name":"list"}
@@ -38,6 +39,11 @@ Mutating operations used by CLIAMPed:
 {"cmd":"queue.clear"}
 {"cmd":"provider.load","provider":"radio","playlist":"<id>"}
 {"cmd":"provider.favorite","provider":"radio","playlist":"<id>"}
+{"cmd":"playlist.create","provider":"local","playlist":"Road trip"}
+{"cmd":"playlist.add","provider":"local","playlist":"Road trip","track":{"path":"/absolute/path/to/audio.flac"}}
+{"cmd":"playlist.add_many","provider":"local","playlist":"Road trip","tracks":[{"path":"/absolute/path/to/a.flac"}]}
+{"cmd":"playlist.bookmark","provider":"local","track":{"path":"/absolute/path/to/audio.flac"}}
+{"cmd":"url.load","path":"/absolute/path/to/album.m3u8","play":true}
 ```
 
 The IPC `volume` value is an absolute dB target, unlike the relative delta accepted by `cliamp volume`. Keep absolute targets within `-30` to `+6` dB.

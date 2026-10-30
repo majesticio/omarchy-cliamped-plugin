@@ -53,6 +53,42 @@ Visualizer frames are limited to 2 KiB, exactly ten finite bands in `[0, 1]`,
 60 frames per second, and a five-second heartbeat. Restart attempts use bounded
 backoff and stop after six consecutive unstable runs.
 
+## Music library
+
+The library helper (`cliamped_library.py`) is a one-shot process like the others:
+isolated mode, an allowlisted environment, cleared of the parent on exit, and
+limited by a QML watchdog (20 seconds for a query, 40 seconds for a scan step).
+It takes one JSON request of at most 16 KiB. Every operation has an exact schema,
+unknown fields and operations are refused, and a reply is trimmed to the 256 KiB
+output cap rather than failing.
+
+A scan is a series of steps that resume where the last stopped, so no process runs
+for long: the panel asks for 8 seconds a step, the helper accepts at most 20, and
+a step is killed after 40. It reads folders and files, never follows a
+symlink, skips names with control, invisible-formatting or surrogate characters
+(the characters that the IPC allowlist refuses in a path), dot files, `@eaDir` and `#recycle`,
+descends at most 40 levels, and stops reading folders once a scan has queued more than one million files to read. A folder it
+cannot read keeps what the index knew below it, and a folder that is missing or
+empty while the index holds files is kept as saved, so an unmounted share cannot
+wipe the library. A file is opened for its tags long after the walk checked it, so
+the reader opens it with `O_NOFOLLOW | O_NONBLOCK` and refuses anything that is
+not a regular file: a symlink swapped in by a hostile share, a FIFO or a device
+is not read. A file that holds a reader past the wait is tried three times and
+then indexed by its name, so one dead file handle cannot keep a scan from ending.
+The tag readers (`cliamped_tags.py`) use the standard library only, read at most
+2 MiB of a file (8 MiB for an MP4 `moov` atom or an Ogg comment header with cover
+art) and skip large frames and pictures with a seek, and a damaged file yields fewer fields, never an
+exception; values are cleaned like every other metadata field.
+
+The index is a SQLite file in a private directory of the user (`0700`, checked
+for ownership and for write access by others) and is rebuilt when its schema
+changes; the folders are the only data kept across a schema change. The panel
+sends a folder only from the sandboxed chooser (`--music-folder`: one folder,
+validated, never walked). Albums are played from an M3U8 file that the helper
+writes with `O_EXCL | O_NOFOLLOW` and mode `0600` into a private directory under
+`$XDG_RUNTIME_DIR`; files older than two hours are removed. Removing a folder
+only edits the index.
+
 ## Files and favorites
 
 Folder imports do not follow symlinks or cross filesystems. An invocation may

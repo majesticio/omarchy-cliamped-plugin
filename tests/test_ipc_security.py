@@ -11,8 +11,10 @@ import unittest
 
 import cliamp_ipc
 from cliamped_security import (
+    MAX_PLAYLIST_ADD,
     MAX_PROVIDERS,
     MAX_TEXT_BYTES,
+    MAX_TRACKS,
     MAX_WIRE_RESPONSE_BYTES,
     ValidationError,
     normalize_request,
@@ -342,6 +344,70 @@ class SchemaBoundaryTests(unittest.TestCase):
             normalize_request({"cmd": "eq", "band": 2, "value": 1}),
             {"cmd": "eq", "band": 2, "value": 1},
         )
+
+    def test_playlist_requests_have_exact_schemas(self):
+        track = {"path": "/music/a.mp3", "title": "A", "provider_meta": {"library.id": "x"}}
+        self.assertEqual(
+            normalize_request({"cmd": "playlist.create", "provider": "local", "playlist": "Road trip"}),
+            {"cmd": "playlist.create", "provider": "local", "playlist": "Road trip"},
+        )
+        self.assertEqual(
+            normalize_request({"cmd": "playlist.add", "provider": "local", "playlist": "Road trip", "track": track}),
+            {"cmd": "playlist.add", "provider": "local", "playlist": "Road trip", "track": track},
+        )
+        many = normalize_request(
+            {"cmd": "playlist.add_many", "provider": "local", "playlist": "Road trip", "tracks": [track] * MAX_PLAYLIST_ADD}
+        )
+        self.assertEqual(len(many["tracks"]), MAX_PLAYLIST_ADD)
+        self.assertEqual(
+            normalize_request({"cmd": "provider.tracks", "provider": "local", "playlist": "Favorites"}),
+            {"cmd": "provider.tracks", "provider": "local", "playlist": "Favorites", "offset": 0, "limit": 18},
+        )
+        rejected = (
+            {"cmd": "playlist.create", "provider": "local"},
+            {"cmd": "playlist.create", "playlist": "x"},
+            {"cmd": "playlist.create", "provider": "local", "playlist": ""},
+            {"cmd": "playlist.create", "provider": "local", "playlist": "a\nb"},
+            {"cmd": "playlist.create", "provider": "local", "playlist": "x" * 513},
+            {"cmd": "playlist.create", "provider": "local", "playlist": "x", "track": track},
+            {"cmd": "playlist.add", "provider": "local", "playlist": "x"},
+            {"cmd": "playlist.add", "provider": "local", "playlist": "x", "track": {"title": "no path"}},
+            {"cmd": "playlist.add", "provider": "local", "playlist": "x", "tracks": [track]},
+            {"cmd": "playlist.add_many", "provider": "local", "playlist": "x", "tracks": []},
+            {"cmd": "playlist.add_many", "provider": "local", "playlist": "x", "tracks": [track] * (MAX_PLAYLIST_ADD + 1)},
+            {"cmd": "playlist.add_many", "provider": "local", "playlist": "x", "tracks": "no"},
+            {"cmd": "playlist.add_many", "provider": "local", "playlist": "x", "tracks": [track, {"bad": 1}]},
+            {"cmd": "provider.tracks", "provider": "local"},
+            {"cmd": "provider.tracks", "provider": "local", "playlist": "x", "limit": MAX_TRACKS + 1},
+        )
+        for request in rejected:
+            with self.subTest(request=request), self.assertRaises(ValidationError):
+                normalize_request(request)
+
+    def test_favorite_toggle_request_has_an_exact_schema(self):
+        track = {"path": "/music/a.mp3", "title": "A"}
+        self.assertEqual(
+            normalize_request({"cmd": "playlist.bookmark", "provider": "local", "track": track}),
+            {"cmd": "playlist.bookmark", "provider": "local", "track": track},
+        )
+        for request in (
+            {"cmd": "playlist.bookmark", "provider": "local"},
+            {"cmd": "playlist.bookmark", "track": track},
+            {"cmd": "playlist.bookmark", "provider": "local", "track": {"title": "no path"}},
+            {"cmd": "playlist.bookmark", "provider": "local", "track": {**track, "extra": 1}},
+            {"cmd": "playlist.bookmark", "provider": "local", "track": track, "playlist": "x"},
+            {"cmd": "playlist.bookmark", "provider": "", "track": track},
+        ):
+            with self.subTest(request=request), self.assertRaises(ValidationError):
+                normalize_request(request)
+
+    def test_playlist_track_listing_is_a_track_model(self):
+        result = normalize_response(
+            {"cmd": "provider.tracks"},
+            {"ok": True, "total": 1, "tracks": [{"path": "/music/a.mp3", "title": "A", "bookmark": True}]},
+        )
+        self.assertEqual(result["tracks"], [{"path": "/music/a.mp3", "title": "A", "bookmark": True}])
+        self.assertEqual(result["total"], 1)
 
     def test_opaque_response_identifiers_are_not_unicode_normalized(self):
         decomposed = "Cafe\u0301"

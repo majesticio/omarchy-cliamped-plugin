@@ -35,6 +35,7 @@ MAX_TRACKS = 256
 MAX_HISTORY_ITEMS = 64
 MAX_LYRIC_LINES = 512
 MAX_DEVICES = 64
+MAX_PLAYLIST_ADD = 64
 
 DEFAULT_DEADLINE_SECONDS = 12.0
 PROVIDER_DEADLINE_SECONDS = 70.0
@@ -522,10 +523,19 @@ def normalize_request(request: Any) -> dict[str, Any]:
             )
         return result
 
-    if command in {"provider.playlists", "provider.catalog", "provider.search", "provider.load", "provider.favorite"}:
+    if command in {
+        "provider.playlists",
+        "provider.catalog",
+        "provider.search",
+        "provider.load",
+        "provider.favorite",
+        "provider.tracks",
+    }:
         allowed = {"provider"}
-        if command == "provider.catalog":
+        if command in {"provider.catalog", "provider.tracks"}:
             allowed.update({"offset", "limit"})
+        if command == "provider.tracks":
+            allowed.add("playlist")
         elif command == "provider.search":
             allowed.update({"query", "limit"})
         elif command in {"provider.load", "provider.favorite"}:
@@ -534,7 +544,17 @@ def normalize_request(request: Any) -> dict[str, Any]:
         if "provider" not in request:
             raise ValidationError(f"{command} requires provider")
         result["provider"] = _opaque_string(request["provider"], field="provider", maximum=128)
-        if command == "provider.catalog":
+        if command == "provider.tracks":
+            if "playlist" not in request:
+                raise ValidationError("provider.tracks requires playlist")
+            result["playlist"] = _opaque_string(
+                request["playlist"], field="playlist", maximum=MAX_IDENTIFIER_BYTES
+            )
+            result["offset"] = _integer(request.get("offset", 0), field="offset", maximum=1_000_000_000)
+            result["limit"] = _integer(
+                request.get("limit", 18), field="limit", minimum=1, maximum=MAX_TRACKS
+            )
+        elif command == "provider.catalog":
             result["offset"] = _integer(request.get("offset", 0), field="offset", maximum=1_000_000_000)
             result["limit"] = _integer(
                 request.get("limit", 18), field="limit", minimum=1, maximum=MAX_PLAYLISTS
@@ -555,6 +575,35 @@ def normalize_request(request: Any) -> dict[str, Any]:
                 result["playlist"] = _opaque_string(
                     request["playlist"], field="playlist", maximum=MAX_IDENTIFIER_BYTES
                 )
+        return result
+
+    if command in {"playlist.create", "playlist.add", "playlist.add_many"}:
+        field = {"playlist.add": "track", "playlist.add_many": "tracks"}.get(command)
+        result = _copy_command(request, {"provider", "playlist", *([field] if field else [])})
+        for required in ("provider", "playlist", *([field] if field else [])):
+            if required not in request:
+                raise ValidationError(f"{command} requires {required}")
+        result["provider"] = _opaque_string(request["provider"], field="provider", maximum=128)
+        # A saved playlist is named by its ID, which is its name.
+        result["playlist"] = _opaque_string(request["playlist"], field="playlist", maximum=MAX_IDENTIFIER_BYTES)
+        if command == "playlist.add":
+            result["track"] = _request_track(request["track"])
+        elif command == "playlist.add_many":
+            tracks = request["tracks"]
+            if not isinstance(tracks, list) or not 1 <= len(tracks) <= MAX_PLAYLIST_ADD:
+                raise ValidationError(f"tracks must hold 1 to {MAX_PLAYLIST_ADD} items")
+            result["tracks"] = [_request_track(track) for track in tracks]
+        return result
+
+    if command == "playlist.bookmark":
+        # Toggles the favorite heart of one track. CLIAMP keeps the legacy name;
+        # it needs a known provider and the track, not a playlist.
+        result = _copy_command(request, {"provider", "track"})
+        for required in ("provider", "track"):
+            if required not in request:
+                raise ValidationError(f"playlist.bookmark requires {required}")
+        result["provider"] = _opaque_string(request["provider"], field="provider", maximum=128)
+        result["track"] = _request_track(request["track"])
         return result
 
     if command == "url.load":
@@ -664,7 +713,7 @@ def normalize_response(
     elif command in {"provider.playlists", "provider.catalog"}:
         _add_model(response, result, "playlists", MAX_PLAYLISTS, _normalize_playlist)
         _optional_int(response, result, "total", 0, 1_000_000_000)
-    elif command in {"provider.search", "provider.load", "url.load"}:
+    elif command in {"provider.search", "provider.load", "provider.tracks", "url.load"}:
         _add_model(response, result, "tracks", MAX_TRACKS, normalize_track)
         _optional_int(response, result, "index", -1, 1_000_000_000)
         _optional_int(response, result, "total", 0, 1_000_000_000)

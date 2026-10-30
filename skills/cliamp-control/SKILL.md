@@ -46,7 +46,7 @@ Use `/usr/bin/cliamp playlist ...` for local collection creation and maintenance
 /usr/bin/omarchy-shell io.github.majesticio.cliamped tab favorites
 /usr/bin/omarchy-shell io.github.majesticio.cliamped tab browse
 /usr/bin/omarchy-shell io.github.majesticio.cliamped tab queue
-/usr/bin/omarchy-shell io.github.majesticio.cliamped tab files
+/usr/bin/omarchy-shell io.github.majesticio.cliamped tab library
 /usr/bin/omarchy-shell io.github.majesticio.cliamped tab more
 /usr/bin/omarchy-shell io.github.majesticio.cliamped visualizer Spectrum
 /usr/bin/omarchy-shell io.github.majesticio.cliamped visualizer Canyon

@@ -1,6 +1,6 @@
 # CLIAMPed
 
-CLIAMPed is a theme-aware Omarchy bar widget and control center for [CLIAMP](https://github.com/bjarneo/cliamp). It brings playback, radio discovery, favorites, collections, local media, and three reactive visualizers into the shell.
+CLIAMPed is a theme-aware Omarchy bar widget and control center for [CLIAMP](https://github.com/bjarneo/cliamp). It brings playback, radio discovery, favorites, collections, your own music library, local media, and three reactive visualizers into the shell.
 
 Its visualizer and controls take their colors from the current Omarchy theme rather than a bundled palette.
 
@@ -13,6 +13,7 @@ Its visualizer and controls take their colors from the current Omarchy theme rat
 - Live song titles and station context for any stream whose metadata CLIAMP exposes
 - CLIAMP source and collection browsing, including Radio Browser favorites and its paged catalog
 - Real queue inspection, play-next, removal, and clearing
+- A Library tab that indexes your music folders, such as a NAS share, and lets you search, browse by artist and album, favorite tracks and build playlists, with any CLIAMP
 - Multiple-file and recursive whole-folder playback
 - Recently played tracks, lyrics, and audio-output switching
 - Keyboard control while the panel is focused
@@ -43,9 +44,23 @@ CLIAMPed resolves CLIAMP Radio's built-in M3U index through CLIAMP's `url.load` 
 Now Playing and the bar show live song metadata from any station, including directory entries and custom URLs. The panel keeps the artist and station beneath the song title. Streams without live metadata retain their supplied title or station name.
 The Radio Browser directory loads automatically; use ☆ and ★ on directory or search-result cards to add or remove Favorites. Because CLIAMP's search IPC omits the playlist IDs required by its native favorite endpoint, searched-station favorites are stored separately in `~/.config/cliamp/cliamped_search_favorites.json` and merged into the same Favorites view.
 
+## Library
+
+The Library tab keeps its own index of the music folders you choose, so it works with the CLIAMP you already have. Scanning, browsing and searching need nothing from CLIAMP; playing, playlists and favorites use CLIAMP's public API. The index is a SQLite file, `~/.local/share/cliamped/library.sqlite3`. CLIAMPed reads the tags itself (ID3, FLAC, Ogg Vorbis and Opus, MP4/M4A) and falls back to the file name.
+
+- **Folders** is where you start. **Add Music Folder…** opens the native chooser; pick the folder where your music lives, such as a mounted NAS share. A scan reads it in the background: the counts rise while it runs, and the lists fill in. **Rescan** looks for new, changed and removed files, and **Remove** takes a folder out of the Library without touching your files.
+- **Artists** lists artists, then their albums, then the tracks of an album. **Albums** lists every album and sorts by name, artist, recently added or year.
+- The search box finds tracks by title, artist or album. Words may come in any order and accents do not count. Selecting a result plays it. The artist and the album shown on a result are links: select one to open it, and use **Back** to return to the results.
+- **Play Album** loads the album into the Queue and plays it, and selecting a track in an album starts there. The star at the end of a track row toggles CLIAMP's ♥ favorite.
+- **Playlists** lists your saved playlists, including Favorites and Recently Played. The **＋** on a track, and **Save Album**, add to a playlist or create one. These are CLIAMP's own saved playlists, so CLIAMP shows them too.
+
+A first scan of a large share can take several minutes, because every file is opened once; after that only new and changed files are read. The Library scans once each time the shell starts, when you first open the tab. A scan runs in short steps, so you can use the panel meanwhile, and one that the shell interrupts continues the next time you open the Library tab. If a share is not mounted, or a folder holds no audio while the index holds some, CLIAMPed keeps the saved index and marks the folder not readable. The scan skips dot files (such as the `._` files macOS leaves on a share), `@eaDir` and `#recycle`, and does not follow symlinks.
+
+Lists load 60 items at a time with **Load More**, and the panel keeps at most 600 items of a list. An album shows at most 200 tracks and a search at most 50 results. The Library plays through CLIAMP's `url.load` and queue, so it needs CLIAMP 2.0 or newer, as the rest of CLIAMPed does. Albums are loaded from a short-lived playlist file in `$XDG_RUNTIME_DIR/cliamped`, so CLIAMP reads the tags of each file itself.
+
 ## Local files and folders
 
-The Files tab offers **Choose Files…** and **Add Folder…**. CLIAMPed closes its layer panel before opening the native picker so the picker stays visible, then returns to Files on cancel/error or Queue after a successful selection. Folder imports:
+The Queue tab offers **Choose Files…** and **Add Folder…**, under the box that adds a path or URL. CLIAMPed closes its layer panel before opening the native picker so the picker stays visible, then returns to Queue. Folder imports:
 
 - recurse through subfolders;
 - sort paths in natural filename order (`2` before `10`);
@@ -103,11 +118,12 @@ Shell IPC:
 ```bash
 /usr/bin/omarchy-shell io.github.majesticio.cliamped open
 /usr/bin/omarchy-shell io.github.majesticio.cliamped tab browse
+/usr/bin/omarchy-shell io.github.majesticio.cliamped tab library
 /usr/bin/omarchy-shell io.github.majesticio.cliamped visualizer Pulse
 /usr/bin/omarchy-shell io.github.majesticio.cliamped close
 ```
 
-The `tab` endpoint accepts `favorites`, `browse`, `queue`, `files`, or `more`. The `visualizer` endpoint accepts `Spectrum`, `Canyon`, or `Pulse`.
+The `tab` endpoint accepts `favorites`, `browse`, `queue`, `library`, or `more`. The old name `files` opens `queue`, where the file pickers now are. The `visualizer` endpoint accepts `Spectrum`, `Canyon`, or `Pulse`.
 
 ## Optional Codex skill
 

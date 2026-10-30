@@ -17,6 +17,7 @@ import subprocess
 import sys
 import threading
 import time
+import unicodedata
 from collections.abc import Iterator, Sequence
 from typing import Any
 
@@ -869,6 +870,37 @@ def choose_paths(folder_mode: bool, explicit: Sequence[str]) -> tuple[list[str],
     return expand_selections(_parse_zenity_selections(stdout)), False
 
 
+def choose_music_folder() -> tuple[str | None, bool]:
+    """Ask for one folder for CLIAMP's Library. Nothing is walked or queued.
+
+    CLIAMP checks the folder and scans it; this helper only returns the
+    validated absolute path of the folder that the user picked.
+    """
+
+    returncode, stdout, stderr = _run_zenity(
+        [
+            "--file-selection",
+            "--directory",
+            "--separator=\n",
+            "--title=Add a music folder to the CLIAMP Library",
+        ]
+    )
+    if returncode == 1:
+        return None, True
+    if returncode != 0:
+        reason = display_text(stderr.decode("utf-8", "replace"), maximum=MAX_ERROR_BYTES)
+        raise PickerBoundaryError(reason or "the folder chooser failed")
+    selections = _parse_zenity_selections(stdout)
+    if len(selections) != 1:
+        raise PickerBoundaryError("choose exactly one folder")
+    # The path goes to CLIAMP under the IPC allowlist, which refuses control and
+    # format characters (zero-width and bidirectional marks among them). Say so
+    # here, where the user can still pick another folder.
+    if any(unicodedata.category(character) in {"Cc", "Cf", "Cs"} for character in selections[0]):
+        raise PickerBoundaryError("the folder name contains control or invisible formatting characters")
+    return selections[0], False
+
+
 def _validate_queue_paths(paths: Sequence[str]) -> list[str]:
     deadline = time.monotonic() + TRAVERSAL_DEADLINE_SECONDS
     state = _TraversalState(deadline)
@@ -1012,6 +1044,19 @@ def main() -> None:
     _stop_requested = False
     _install_signal_handlers()
     arguments = sys.argv[1:]
+    if arguments == ["--music-folder"]:
+        try:
+            _arm_helper_parent_death()
+            path, cancelled = choose_music_folder()
+            if cancelled or path is None:
+                _emit({"ok": True, "cancelled": True, "count": 0})
+                return
+            _emit({"ok": True, "path": path, "source_kind": "music_folder"})
+        except (OSError, TimeoutError, RuntimeError, ValueError) as error:
+            reason = display_text(str(error), maximum=MAX_ERROR_BYTES)
+            _emit({"ok": False, "error": f"Could not choose the folder: {reason}"})
+            raise SystemExit(1)
+        return
     folder_mode = bool(arguments and arguments[0] == "--folder")
     if arguments and arguments[0] in ("--folder", "--files"):
         arguments = arguments[1:]
